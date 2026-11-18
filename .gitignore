@@ -1,0 +1,5 @@
+digest/
+charts/
+server.log
+__pycache__/
+*.bak-*

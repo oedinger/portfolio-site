@@ -1,0 +1,202 @@
+{
+  "META": [
+    {
+      "file": "garp-charts/meta-pe-calibrated-2026-11-08.png",
+      "caption": "גרף GARP מכויל (PE) — 8/11/2026"
+    },
+    {
+      "file": "garp-charts/meta-ocf-calibrated-2026-11-08.png",
+      "caption": "גרף OCF מכויל — 8/11/2026"
+    }
+  ],
+  "MSFT": [
+    {
+      "file": "garp-charts/MSFT-app.png",
+      "caption": "גרף GARP — garpvi"
+    }
+  ],
+  "NFLX": [
+    {
+      "file": "garp-charts/NFLX-pe.png",
+      "caption": "גרף PE, חלון 3 שנים — garpvi"
+    },
+    {
+      "file": "garp-charts/NFLX-ocf.png",
+      "caption": "גרף OCF, חלון 3 שנים — garpvi"
+    }
+  ],
+  "UBER": [
+    {
+      "file": "garp-charts/UBER-pe.png",
+      "caption": "גרף GARP (EPS) — garpvi"
+    }
+  ],
+  "CNSWF": [
+    {
+      "file": "garp-charts/cnswf-pe-calibrated-2026-11-08.png",
+      "caption": "גרף PE מכויל — 8/11/2026"
+    }
+  ],
+  "MA": [
+    {
+      "file": "garp-charts/MA-app.png",
+      "caption": "גרף GARP — garpvi"
+    }
+  ],
+  "AVGO": [
+    {
+      "file": "garp-charts/avgo-pe-calibrated-2026-11-06.png",
+      "caption": "גרף PE מכויל — 6/11/2026"
+    }
+  ],
+  "AMZN": [
+    {
+      "file": "garp-charts/AMZN-pe.png",
+      "caption": "גרף GARP מכויל (PE) — garpvi"
+    }
+  ],
+  "BRK-B": [
+    {
+      "file": "garp-charts/brk-b-pe-calibrated-2026-11-08.png",
+      "caption": "גרף PE מכויל — 8/11/2026"
+    }
+  ],
+  "BN": [
+    {
+      "file": "garp-charts/BN.png",
+      "caption": "גרף GARP מכויל — garpvi"
+    }
+  ],
+  "CAVA": [
+    {
+      "file": "garp-charts/cava-pe-calibrated-2026-11-08.png",
+      "caption": "גרף PE מכויל — 8/11/2026"
+    }
+  ],
+  "CRWV": [
+    {
+      "file": "garp-charts/CRWV.png",
+      "caption": "גרף GARP מכויל — garpvi"
+    }
+  ],
+  "DKNG": [
+    {
+      "file": "garp-charts/DKNG.png",
+      "caption": "גרף GARP מכויל — garpvi"
+    }
+  ],
+  "GOOGL": [
+    {
+      "file": "garp-charts/googl-pe-calibrated-2026-11-06.png",
+      "caption": "גרף GARP מכויל (PE) — 6/11/2026"
+    },
+    {
+      "file": "garp-charts/googl-ocf-calibrated-2026-11-06.png",
+      "caption": "גרף OCF מכויל — 6/11/2026"
+    }
+  ],
+  "HHH": [
+    {
+      "file": "garp-charts/hhh-pe-calibrated-2026-11-08.png",
+      "caption": "גרף PE מכויל — 8/11/2026"
+    }
+  ],
+  "LULU": [
+    {
+      "file": "garp-charts/LULU.png",
+      "caption": "גרף GARP מכויל — garpvi"
+    }
+  ],
+  "MCD": [
+    {
+      "file": "garp-charts/mcd-pe-calibrated-2026-11-08.png",
+      "caption": "גרף PE מכויל — 8/11/2026"
+    }
+  ],
+  "MELI": [
+    {
+      "file": "garp-charts/meli-pe-calibrated-2026-11-08.png",
+      "caption": "גרף PE מכויל — 8/11/2026"
+    }
+  ],
+  "MU": [
+    {
+      "file": "garp-charts/MU.png",
+      "caption": "גרף GARP מכויל — garpvi"
+    }
+  ],
+  "NOW": [
+    {
+      "file": "garp-charts/now-pe-calibrated-2026-11-08.png",
+      "caption": "גרף PE מכויל — 8/11/2026"
+    }
+  ],
+  "NU": [
+    {
+      "file": "garp-charts/NU.png",
+      "caption": "גרף GARP מכויל — garpvi"
+    }
+  ],
+  "ONON": [
+    {
+      "file": "garp-charts/ONON.png",
+      "caption": "גרף GARP מכויל — garpvi"
+    }
+  ],
+  "SBUX": [
+    {
+      "file": "garp-charts/sbux-pe-calibrated-2026-11-08.png",
+      "caption": "גרף PE מכויל — 8/11/2026"
+    }
+  ],
+  "SHOP": [
+    {
+      "file": "garp-charts/SHOP.png",
+      "caption": "גרף GARP מכויל — garpvi"
+    }
+  ],
+  "SOFI": [
+    {
+      "file": "garp-charts/sofi-pe-calibrated-2026-11-08.png",
+      "caption": "גרף PE מכויל — 8/11/2026"
+    }
+  ],
+  "SPGI": [
+    {
+      "file": "garp-charts/spgi-pe-calibrated-2026-11-08.png",
+      "caption": "גרף PE מכויל — 8/11/2026"
+    }
+  ],
+  "V": [
+    {
+      "file": "garp-charts/V.png",
+      "caption": "גרף GARP מכויל — garpvi"
+    }
+  ],
+  "GOOG": [
+    {
+      "file": "garp-charts/googl-pe-calibrated-2026-11-06.png",
+      "caption": "גרף GARP מכויל (PE) — 6/11/2026 (אנליזת GOOGL)"
+    },
+    {
+      "file": "garp-charts/googl-ocf-calibrated-2026-11-06.png",
+      "caption": "גרף OCF מכויל — 6/11/2026 (אנליזת GOOGL)"
+    }
+  ],
+  "NVDA": [
+    {
+      "file": "garp-charts/nvda-pe-calibrated-2026-11-06.png",
+      "caption": "גרף PE מכויל — 6/11/2026"
+    }
+  ],
+  "CME": [
+    {
+      "file": "garp-charts/cme-pe-calibrated-2026-11-08.png",
+      "caption": "גרף PE מכויל — 8/11/2026"
+    },
+    {
+      "file": "garp-charts/cme-ocf-calibrated-2026-11-08.png",
+      "caption": "גרף OCF מכויל — 8/11/2026"
+    }
+  ]
+}
