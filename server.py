@@ -69,6 +69,23 @@ HOME_VALUE_ILS = 4100000; MORTGAGE_ILS = 1200000
 # almost certainly a typo). Default ₪1,000,000 (Oren, 18/11/2026), EXCLUDED from
 # the total until he checks the box.
 RAMAT_HASHARON_ILS = 1000000
+# Bridge loan (Oren, 18/11/2026) — simulation from Planit 09-2026 reports:
+# liquid base ₪2,042,840 (general ₪1,330,959 / stocks ₪711,881); existing loans
+# assumed repaid and re-borrowed at max; Norton ₪475,000 (₪1,714/mo) deducted.
+# Max after Norton: 50% flat ₪546,420 (monthly ₪1,691) / 50-70 ₪812,612 (₪2,578).
+# Monthly on a taken amount X (residual method, as in the analysis):
+#   max(0, (X + 475,000) * 4.00% / 12 - 1,714)
+BRIDGE_BASE_ILS = 2042840; BRIDGE_GENERAL_ILS = 1330959; BRIDGE_STOCKS_ILS = 711881
+BRIDGE_MAX_FLAT_ILS = 546420; BRIDGE_MAX_TRACK_ILS = 812612
+BRIDGE_RATE = 4.00; BRIDGE_MAX_FLAT_PAY_ILS = 1691; BRIDGE_MAX_TRACK_PAY_ILS = 2578
+# NVIDIA RSU grant — contract figure 1,380,000 (1.2M + 180K), confirmed by
+# Oren 19/11/2026 (he first stated 1,480,000). Gross; taxed at the marginal
+# rate like a bonus when received; future gains taxed as capital gains.
+NVIDIA_GRANT_ILS = 1380000
+NVIDIA_GRANT_TAX_PCT = 50.0  # marginal rate, like a bonus (Oren, 19/11/2026)
+def _bridge_pay(amt):
+    if amt <= 0: return 0.0
+    return max(0.0, round((amt + NORTON_LOAN_ILS) * BRIDGE_RATE / 100.0 / 12.0 - NORTON_MONTHLY_ILS))
 # Purchase costs (Oren, 10/11/2026): brokerage 2%+VAT, lawyer 0.5%+VAT, VAT 18% (since 1/1/2025).
 BROKER_PCT = 0.02; LAWYER_PCT = 0.005; VAT_RATE = 0.18
 # Purchase tax 2026, single apartment - frozen brackets until 15/1/2028 (Tax Authority instruction 1/2025).
@@ -78,13 +95,46 @@ PRIME_RATE = 4.75; PRIME_SPREAD = -0.75
 FIXED_RATE = 4.62  # fixed non-CPI, 15-20y average
 VAR_RATE = 4.56    # variable non-CPI, resets every 2-5y
 MORT_YEARS = 20
-PURCHASE_PRICE_DEFAULT = 7000000
+PURCHASE_PRICE_DEFAULT = 8000000  # Oren, 18/11/2026 — was 7000000
 # Renovation as part of the purchase cost (Oren, 18/11/2026); included by default.
 RENOVATION_ILS = 300000
 NORTON_COMMIT_USD = 150000; NORTON_WIRED_ILS = 475000; NORTON_WIRE_DATE = "25/01/2026"
 NORTON_RECEIVED_USD = 150961.39; NORTON_REFUND_USD = 961.39
 NORTON_LOAN_ILS = 475000; NORTON_MONTHLY_ILS = 1714; NORTON_ASOF = "31/08/2026"
 
+# House-tab user defaults (Oren, 18/11/2026): saved from the site itself via
+# POST /house/defaults; stored in house_defaults.json next to server.py
+# (runtime data — NOT pushed to git, like digest/). Read fresh on each request.
+HOUSE_DEFAULTS_FILE = os.path.join(BASE, "house_defaults.json")
+HOUSE_DEFAULT_KEYS = {"buy_price": "num", "reno_cost": "num", "reno_incl": "bool", "home_val": "num", "mortgage": "num", "ramat_amount": "num", "ramat_incl": "bool", "rsu_pct": "num", "bridge_amount": "num", "meta_price": "num", "meta_override": "bool", }
+def load_house_defaults():
+    try:
+        d = json.load(open(HOUSE_DEFAULTS_FILE, encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+def _def_num(dfl, key, fallback, lo=0.0, hi=None):
+    try:
+        v = float(dfl.get(key, fallback))
+    except Exception:
+        return fallback
+    if v != v or v == float("inf") or v == float("-inf"):
+        return fallback
+    v = max(lo, v)
+    if hi is not None:
+        v = min(hi, v)
+    return v
+def _def_bool(dfl, key, fallback):
+    v = dfl.get(key, fallback)
+    return bool(v) if isinstance(v, bool) else fallback
+def save_house_default(key, value):
+    dfl = load_house_defaults()
+    dfl[key] = value
+    tmp = HOUSE_DEFAULTS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(dfl, f, ensure_ascii=False)
+    os.replace(tmp, HOUSE_DEFAULTS_FILE)
+    return dfl
 def norm(sym): return (sym or "").replace(" ", "-").strip()
 def fnum(v):
     try: return float(v)
@@ -332,8 +382,8 @@ def bench_return(sym, start_d, end_d):
     if s and e: return (e / s - 1) * 100
     return None
 
-CHART_INDEX = [("^GSPC", "S&P 500", "#f5a623"), ("^NDX", "Nasdaq 100", "#31c573"),
-               ("SOXX", "SOXX", "#c792ea"), ("^VIX", "VIX", "#f45d5d")]
+CHART_INDEX = [("^GSPC", "S&P 500", "#f59e0b"), ("^NDX", "Nasdaq 100", "#4ade80"),
+               ("SOXX", "SOXX", "#8b5cf6"), ("^VIX", "VIX", "#f87171")]
 def chart_series():
     # Daily TWR index for the portfolio (100 at the first NAV date, flows chained out)
     # + raw daily closes for the comparison indices, aligned to the portfolio's dates.
@@ -519,10 +569,16 @@ def load_options_data(fd):
         try: flex_date = datetime.strptime(fd["daily"]["date"], "%Y%m%d").date()
         except Exception: flex_date = None
     out = []
+    flex_has_positions = bool(fd and fd.get("daily") and fd["daily"].get("positions"))
     for o in OPTIONS:
         und = o["underlying"]
-        fx = (occ_map.get(und) or [{}])
+        fx = occ_map.get(und) or []
+        if flex_has_positions and not fx:
+            continue  # closed — no longer in Flex (was: stale seed price kept showing it)
         fx0 = fx[0] if fx else {}
+        o = dict(o)
+        if fx0.get("qty"):
+            o["contracts"] = int(fx0["qty"])  # Flex qty wins over the seed
         occ = fx0.get("occ")
         price = None; asof = ""; live = False
         if occ:
@@ -544,23 +600,29 @@ def load_options_data(fd):
 # Data computations above are frozen. Everything below is rendering only.
 
 CSS = """<style>
+@import url('https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700;800&display=swap');
 :root{
-  --bg:#07090d; --bg2:#0a0d13; --panel:#10141e; --panel2:#151b29; --panel3:#0c0f16;
-  --line:#1f2839; --line2:#2c3a55; --tx:#eef2fa; --tx2:#a9b5cc; --tx3:#68758f;
-  --acc:#4da3ff; --acc2:#7cc4ff; --up:#31c573; --down:#f45d5d; --warn:#f2b84b; --vio:#c792ea;
-  --up-bg:rgba(49,197,115,.13); --down-bg:rgba(244,93,93,.13); --warn-bg:rgba(242,184,75,.13); --acc-bg:rgba(77,163,255,.12);
-  --r:14px; --r-sm:10px; --r-lg:18px; --hdr:58px;
-  --shadow:0 10px 28px rgba(0,0,0,.38), 0 2px 6px rgba(0,0,0,.3);
+  --bg:#23232e; --bg2:#1e1e28; --panel:#2e2e3a; --panel2:#33333f; --panel3:#2a2a36;
+  --line:#3a3a48; --line2:#4a4a58; --tx:#f5f5f7; --tx2:#c5c5d0; --tx3:#9ca3af;
+  --acc:#5ea0f7; --acc2:#7db4f9; --up:#4ade80; --down:#f87171; --warn:#fbbf24; --vio:#8b5cf6;
+  --cyan:#7dd3fc; --indigo:#6366f1;
+  --up-bg:rgba(74,222,128,.12); --down-bg:rgba(248,113,113,.12); --warn-bg:rgba(251,191,36,.12); --acc-bg:rgba(94,160,247,.12);
+  --r:12px; --r-sm:8px; --r-lg:12px; --hdr:48px;
+  --shadow:0 8px 24px rgba(0,0,0,.22), 0 1px 3px rgba(0,0,0,.25);
 }
 *{box-sizing:border-box}
 html{color-scheme:dark}
-body{margin:0;background:radial-gradient(1100px 480px at 85% -120px,rgba(77,163,255,.09),transparent 60%),radial-gradient(800px 420px at 0% -80px,rgba(49,197,115,.05),transparent 55%),var(--bg);color:var(--tx);font-family:'Heebo',system-ui,'Segoe UI',Arial,sans-serif;direction:rtl;-webkit-font-smoothing:antialiased}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:'Inter','Heebo',system-ui,'Segoe UI',Arial,sans-serif;direction:rtl;-webkit-font-smoothing:antialiased}
 a{color:var(--acc2);text-decoration:none}
 a:hover{text-decoration:underline}
 .num,.card .v,td,th,.big{font-variant-numeric:tabular-nums lining-nums}
+/* numbers always render LTR (a leading minus must stay on the left): value
+   containers are numbers-only, and pos/neg mark numeric values everywhere */
+.card .v,.hero .v,.snap .v,.dv,.lv,.ov,.tv{direction:ltr}
+.pos,.neg{direction:ltr;unicode-bidi:isolate}
 /* ---------- header ---------- */
-header{position:sticky;top:0;z-index:50;background:rgba(9,12,18,.88);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
-.hwrap{max-width:1560px;margin:0 auto;padding:0 16px;height:var(--hdr);display:flex;gap:16px;align-items:center}
+header{position:sticky;top:0;z-index:50;background:rgba(30,30,40,.92);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.hwrap{max-width:1200px;margin:0 auto;padding:0 16px;height:var(--hdr);display:flex;gap:16px;align-items:center}
 .brand{display:flex;align-items:center;gap:9px;font-weight:800;font-size:16.5px;color:var(--tx);white-space:nowrap}
 .brand svg{display:block}
 nav.mainnav{display:flex;gap:4px}
@@ -569,17 +631,17 @@ nav.mainnav a:hover{color:var(--tx);background:var(--panel2);text-decoration:non
 nav.mainnav a.on{color:#fff;background:var(--panel2);box-shadow:inset 0 -2px 0 var(--acc);font-weight:700}
 .hside{margin-inline-start:auto;display:flex;align-items:center;gap:10px}
 .clock{font-size:12.5px;color:var(--tx2);font-variant-numeric:tabular-nums;white-space:nowrap}
-.mkt{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;padding:4px 10px;border-radius:20px;border:1px solid var(--line2);color:var(--tx2);white-space:nowrap}
+.mkt{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;padding:4px 10px;border-radius:6px;border:1px solid var(--line2);color:var(--tx2);white-space:nowrap}
 .mkt .dot{width:7px;height:7px;border-radius:50%;background:var(--tx3)}
-.mkt.open{color:#8fe6b4;border-color:rgba(49,197,115,.45);background:var(--up-bg)} .mkt.open .dot{background:var(--up);animation:pulse 1.8s infinite}
-.mkt.pre{color:#ffd98a;border-color:rgba(242,184,75,.45);background:var(--warn-bg)} .mkt.pre .dot{background:var(--warn)}
-@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(49,197,115,.5)}70%{box-shadow:0 0 0 6px rgba(49,197,115,0)}100%{box-shadow:0 0 0 0 rgba(49,197,115,0)}}
+.mkt.open{color:#86efac;border-color:rgba(74,222,128,.45);background:var(--up-bg)} .mkt.open .dot{background:var(--up);animation:pulse 1.8s infinite}
+.mkt.pre{color:#fde68a;border-color:rgba(251,191,36,.45);background:var(--warn-bg)} .mkt.pre .dot{background:var(--warn)}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(74,222,128,.5)}70%{box-shadow:0 0 0 6px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
 .asof{font-size:11px;color:var(--tx3);white-space:nowrap}
 .asofline{font-size:11.5px;color:var(--tx3);margin:0 2px 12px}
 /* ---------- layout ---------- */
-main{max-width:1560px;margin:0 auto;padding:18px 16px 56px}
-h2.sec{margin:26px 0 12px;font-size:16px;font-weight:800;display:flex;align-items:center;gap:8px}
-h2.sec::before{content:"";width:4px;height:17px;border-radius:2px;background:linear-gradient(180deg,var(--acc),rgba(77,163,255,.25))}
+main{max-width:1200px;margin:0 auto;padding:24px 16px 56px}
+h2.sec{margin:32px 0 14px;font-size:17px;font-weight:800;display:flex;align-items:center;gap:8px}
+h2.sec::before{content:"";width:4px;height:17px;border-radius:2px;background:linear-gradient(180deg,var(--acc),var(--vio))}
 h2.sec:first-child{margin-top:2px}
 .grid{display:grid;gap:12px;margin:12px 0}
 .g-perf{grid-template-columns:repeat(auto-fit,minmax(205px,1fr))}
@@ -591,25 +653,25 @@ h2.sec:first-child{margin-top:2px}
 .snap .q{font-size:13px;color:var(--tx2);font-weight:700}
 .snap .v{font-size:30px;font-weight:850;margin-top:4px;letter-spacing:-.3px}
 .snap .s{font-size:12.5px;color:var(--tx2);margin-top:6px;line-height:1.55}
-.card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:var(--r);padding:15px 16px;box-shadow:0 1px 0 rgba(255,255,255,.02) inset}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;box-shadow:0 1px 2px rgba(0,0,0,.18)}
 .card .t{color:var(--tx2);font-size:12.5px;font-weight:600}
-.card .v{font-size:24px;font-weight:800;margin-top:5px;letter-spacing:-.2px}
+.card .v{font-size:26px;font-weight:800;margin-top:5px;letter-spacing:-.2px}
 .card .s{font-size:12px;color:var(--tx3);margin-top:4px;line-height:1.5}
 .pos{color:var(--up)} .neg{color:var(--down)} .warn{color:var(--warn)} .muted{color:var(--tx3)} .small{font-size:12px}
-.pill{display:inline-flex;align-items:center;gap:4px;font-weight:700;font-size:13px;padding:3px 10px;border-radius:20px;font-variant-numeric:tabular-nums;direction:ltr}
-.pill.pos{background:rgba(49,197,115,.22);border:1px solid rgba(49,197,115,.45)} .pill.neg{background:rgba(244,93,93,.22);border:1px solid rgba(244,93,93,.45)}
-.badge{display:inline-block;background:rgba(49,197,115,.12);color:#8fe6b4;border:1px solid rgba(49,197,115,.35);border-radius:20px;padding:1px 9px;font-size:12px;font-weight:600}
-.chip{display:inline-block;background:#1a2336;border:1px solid var(--line2);border-radius:14px;padding:1px 8px;font-size:11.5px;margin-inline-end:4px;color:var(--tx2)}
+.pill{display:inline-flex;align-items:center;gap:4px;font-weight:700;font-size:13px;padding:3px 10px;border-radius:6px;font-variant-numeric:tabular-nums;direction:ltr}
+.pill.pos{background:rgba(74,222,128,.22);border:1px solid rgba(74,222,128,.45)} .pill.neg{background:rgba(248,113,113,.22);border:1px solid rgba(248,113,113,.45)}
+.badge{display:inline-block;background:var(--up-bg);color:#86efac;border:1px solid rgba(74,222,128,.35);border-radius:6px;padding:1px 9px;font-size:12px;font-weight:600}
+.chip{display:inline-block;background:#3a3a48;border:1px solid var(--line2);border-radius:8px;padding:1px 8px;font-size:11.5px;margin-inline-end:4px;color:var(--tx2)}
 a.chip{color:var(--acc2)} a.chip:hover{border-color:var(--acc);text-decoration:none}
 /* ---------- hero ---------- */
-.hero{background:linear-gradient(150deg,#131b2c,#0c1119 55%,#0a0e15);border:1px solid #263450;border-radius:var(--r-lg);padding:20px 20px 8px;box-shadow:var(--shadow);overflow:hidden}
+.hero{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);padding:20px 20px 8px;box-shadow:var(--shadow);overflow:hidden}
 .hero .t{color:var(--tx2);font-size:13px;font-weight:600}
 .hero .v{font-size:clamp(34px,6vw,46px);font-weight:850;letter-spacing:-.5px;margin-top:2px}
 .hero .sub{font-size:12.5px;color:var(--tx3);margin-top:3px}
 .hero .dayline{margin-top:12px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:13.5px}
 .chartwrap{position:relative;margin-top:8px}
 .chartwrap svg{display:block;width:100%;height:auto}
-.chtip{position:absolute;top:2px;background:#0a0e16;border:1px solid var(--line2);border-radius:8px;padding:4px 9px;font-size:12px;pointer-events:none;opacity:0;transition:opacity .12s;white-space:nowrap;box-shadow:var(--shadow);z-index:3}
+.chtip{position:absolute;top:2px;background:#2e2e3a;border:1px solid var(--line2);border-radius:8px;padding:4px 9px;font-size:12px;pointer-events:none;opacity:0;transition:opacity .12s;white-space:nowrap;box-shadow:var(--shadow);z-index:3}
 .chartwrap:hover .chtip{opacity:1}
 .axislbl{font-size:10.5px;fill:var(--tx3)}
 /* ---------- perf cards ---------- */
@@ -619,22 +681,22 @@ a.chip{color:var(--acc2)} a.chip:hover{border-color:var(--acc);text-decoration:n
 .bench .brow{display:grid;grid-template-columns:64px 52px 1fr auto;align-items:center;gap:8px;font-size:12px}
 .bench .bname{color:var(--tx2);font-weight:600}
 .bench .bpct{font-weight:700;text-align:left;font-variant-numeric:tabular-nums}
-.btrack{height:5px;background:#1a2130;border-radius:3px;overflow:hidden}
+.btrack{height:5px;background:#3a3a48;border-radius:3px;overflow:hidden}
 .bfill{height:100%;border-radius:3px;background:var(--acc)}
 .bfill.up{background:var(--up)} .bfill.down{background:var(--down)}
-.gap{font-size:11px;font-weight:700;padding:1px 7px;border-radius:12px;background:var(--panel3);border:1px solid var(--line)}
+.gap{font-size:11px;font-weight:700;padding:1px 7px;border-radius:6px;background:var(--panel3);border:1px solid var(--line)}
 .gap.pos{color:var(--up)} .gap.neg{color:var(--down)}
 .nodata{border:1px dashed var(--line2);border-radius:var(--r);padding:15px 16px;background:rgba(255,255,255,.015);color:var(--tx3)}
 .nodata .t{font-weight:700;color:var(--tx2);font-size:13.5px}
 .foot{color:var(--tx3);font-size:12px;line-height:1.6;margin:8px 2px}
 .chart-ctrl{display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between;margin-bottom:12px}
 .ranges,.chips{display:flex;gap:6px;flex-wrap:wrap}
-.rbtn,.chip{cursor:pointer;border:1px solid var(--line2);background:var(--panel2);color:var(--tx2);border-radius:999px;padding:6px 14px;font-size:13px;font-family:inherit}
-.rbtn.on{border-color:var(--acc);color:#fff;background:#16283f}
-.chip.on{border-color:var(--c);color:#fff;background:#16283f}
+.rbtn,.chip{cursor:pointer;border:1px solid var(--line2);background:var(--panel2);color:var(--tx2);border-radius:8px;padding:6px 14px;font-size:13px;font-family:inherit}
+.rbtn.on{border-color:var(--acc);color:#fff;background:rgba(94,160,247,.16)}
+.chip.on{border-color:var(--c);color:#fff;background:rgba(94,160,247,.16)}
 .chart-wrap{position:relative;overflow-x:auto}
 .chart-wrap svg{min-width:720px}
-.chart-tip{position:absolute;z-index:5;background:#0d1320;border:1px solid var(--line2);border-radius:8px;padding:8px 10px;font-size:12.5px;pointer-events:none;min-width:150px;box-shadow:0 6px 18px rgba(0,0,0,.45);line-height:1.7}
+.chart-tip{position:absolute;z-index:5;background:#2e2e3a;border:1px solid var(--line2);border-radius:8px;padding:8px 10px;font-size:12.5px;pointer-events:none;min-width:150px;box-shadow:0 6px 18px rgba(0,0,0,.45);line-height:1.7}
 .chart-tip .sw{display:inline-block;width:9px;height:9px;border-radius:50%;margin-left:5px}
 .chart-legend{display:flex;flex-wrap:wrap;gap:16px;margin-top:10px;font-size:13.5px;color:var(--tx2)}
 .lg-item .sw{display:inline-block;width:9px;height:9px;border-radius:50%;margin-left:5px}
@@ -651,10 +713,10 @@ a.chip{color:var(--acc2)} a.chip:hover{border-color:var(--acc);text-decoration:n
 .lrow .lv{margin-inline-start:auto;font-weight:700}
 .lrow .lp{color:var(--tx3);font-size:12px;min-width:44px;text-align:left}
 .hbar-row{display:grid;grid-template-columns:86px 1fr auto;gap:10px;align-items:center;margin-top:10px;font-size:13px}
-.hbar-track{height:9px;background:#1a2130;border-radius:5px;overflow:hidden}
+.hbar-track{height:9px;background:#3a3a48;border-radius:5px;overflow:hidden}
 .hbar-fill{height:100%;border-radius:5px}
 .gauge{margin-top:10px}
-.gauge .gtrack{position:relative;height:10px;background:linear-gradient(90deg,#274058,#3d5a80);border-radius:6px}
+.gauge .gtrack{position:relative;height:10px;background:linear-gradient(90deg,#3a3a48,#4a7dd6);border-radius:6px}
 .gauge .gfill{position:absolute;top:0;bottom:0;inset-inline-start:0;background:linear-gradient(90deg,var(--acc),var(--acc2));border-radius:6px}
 .gauge .gtick{position:absolute;top:-4px;width:2px;height:18px;background:var(--warn)}
 .gauge .glbls{display:flex;justify-content:space-between;font-size:11px;color:var(--tx3);margin-top:5px}
@@ -719,53 +781,53 @@ tr.panelrow td{padding:0;border:none}
 .tile .trow{display:flex;justify-content:space-between;align-items:center;gap:8px}
 .spark{display:block}
 /* ---------- tables ---------- */
-.tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:thin;scrollbar-color:#2c3a55 transparent;border:1px solid var(--line);border-radius:var(--r);background:var(--panel3);box-shadow:0 1px 0 rgba(255,255,255,.02) inset}
+.tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:thin;scrollbar-color:#4a4a58 transparent;border:1px solid var(--line);border-radius:var(--r);background:var(--panel3);box-shadow:0 1px 0 rgba(255,255,255,.02) inset}
 .tblwrap::-webkit-scrollbar{height:8px;width:8px}
-.tblwrap::-webkit-scrollbar-thumb{background:#2c3a55;border-radius:4px}
+.tblwrap::-webkit-scrollbar-thumb{background:#4a4a58;border-radius:4px}
 .tblwrap::-webkit-scrollbar-track{background:transparent}
 table{width:100%;border-collapse:separate;border-spacing:0;font-size:13.5px;font-variant-numeric:tabular-nums}
-th,td{padding:9px 10px;border-bottom:1px solid #171e2c;text-align:right;white-space:nowrap;vertical-align:middle}
-thead th{color:var(--tx2);font-weight:700;background:#131926;font-size:12.5px;position:sticky;top:0;z-index:4;border-bottom:1px solid var(--line2)}
+th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;vertical-align:middle}
+thead th{color:var(--tx2);font-weight:700;background:#2a2a36;font-size:12.5px;position:sticky;top:0;z-index:4;border-bottom:1px solid var(--line2)}
 tbody tr{transition:background .12s}
-tbody tr:hover{background:rgba(77,163,255,.05)}
+tbody tr:hover{background:rgba(94,160,247,.05)}
 tr.clickable{cursor:pointer}
 table.sortable thead th[data-sort]{cursor:pointer;user-select:none}
 table.sortable thead th[data-sort]:hover{color:var(--tx)}
 table.sortable thead th .arr{font-size:10px;color:var(--acc)}
 .pnlwrap{display:flex;flex-direction:column;gap:3px;align-items:flex-start}
-.pnlbar{width:64px;height:4px;background:#1a2130;border-radius:2px;overflow:hidden}
+.pnlbar{width:64px;height:4px;background:#3a3a48;border-radius:2px;overflow:hidden}
 .pnlbar i{display:block;height:100%;border-radius:2px}
 .searchbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0}
-.searchbar input[type=search]{background:var(--panel);border:1px solid var(--line2);color:var(--tx);border-radius:10px;padding:9px 13px;font-size:14px;min-width:210px;font-family:inherit}
-.searchbar input[type=search]:focus{outline:2px solid rgba(77,163,255,.5);border-color:var(--acc)}
+.searchbar input[type=search]{background:#3a3a48;border:1px solid var(--line2);color:var(--tx);border-radius:8px;padding:9px 13px;font-size:14px;min-width:210px;font-family:inherit}
+.searchbar input[type=search]:focus{outline:2px solid rgba(94,160,247,.5);border-color:var(--acc)}
 .toggle{display:inline-flex;background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:3px;gap:2px}
-.toggle a{padding:6px 16px;border-radius:9px;color:var(--tx2);font-size:13.5px;font-weight:600;transition:all .15s}
+.toggle a{padding:6px 16px;border-radius:6px;color:var(--tx2);font-size:13.5px;font-weight:600;transition:all .15s}
 .toggle a:hover{color:var(--tx);text-decoration:none}
-.toggle a.on{background:#22314e;color:#fff;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.35)}
+.toggle a.on{background:rgba(94,160,247,.16);color:#fff;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.35)}
 .closedtbl{opacity:.78} .closedtbl thead th{background:#10141d}
 /* ---------- options cards ---------- */
 .optgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(265px,1fr));gap:12px}
 .optcard .ohead{display:flex;align-items:center;gap:9px}
 .optcard .osym{font-size:19px;font-weight:850}
-.otype{font-size:11px;font-weight:800;padding:2px 9px;border-radius:12px;background:var(--acc-bg);color:var(--acc2);border:1px solid rgba(77,163,255,.35)}
-.otype.put{background:var(--warn-bg);color:var(--warn);border-color:rgba(242,184,75,.35)}
+.otype{font-size:11px;font-weight:800;padding:2px 9px;border-radius:6px;background:var(--acc-bg);color:var(--acc2);border:1px solid rgba(94,160,247,.35)}
+.otype.put{background:var(--warn-bg);color:var(--warn);border-color:rgba(251,191,36,.35)}
 .ochips{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
-.ochip{background:var(--panel3);border:1px solid var(--line);border-radius:9px;padding:5px 9px;font-size:12px;color:var(--tx2)}
+.ochip{background:var(--panel3);border:1px solid var(--line);border-radius:6px;padding:5px 9px;font-size:12px;color:var(--tx2)}
 .ochip b{color:var(--tx);font-variant-numeric:tabular-nums}
 .money{margin-top:12px}
-.money .mtrack{position:relative;height:8px;background:#1a2130;border-radius:5px}
+.money .mtrack{position:relative;height:8px;background:#3a3a48;border-radius:5px}
 .money .mstrike{position:absolute;top:-3px;width:2px;height:14px;background:var(--warn)}
-.money .mprice{position:absolute;top:50%;width:11px;height:11px;border-radius:50%;background:var(--acc2);border:2px solid #0a0e16;transform:translate(50%,-50%);box-shadow:0 0 0 3px rgba(124,196,255,.25)}
+.money .mprice{position:absolute;top:50%;width:11px;height:11px;border-radius:50%;background:var(--acc2);border:2px solid #23232e;transform:translate(50%,-50%);box-shadow:0 0 0 3px rgba(125,180,249,.25)}
 .money .mlbls{display:flex;justify-content:space-between;font-size:11px;color:var(--tx3);margin-top:5px}
 .orow{display:flex;justify-content:space-between;align-items:baseline;margin-top:10px;border-top:1px dashed var(--line);padding-top:9px}
 .orow .ov{font-size:19px;font-weight:800}
 /* ---------- stock detail ---------- */
-.stockhead{background:linear-gradient(150deg,#131b2c,#0b0f16);border:1px solid #263450;border-radius:var(--r-lg);padding:18px 20px;box-shadow:var(--shadow)}
+.stockhead{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);padding:18px 20px;box-shadow:var(--shadow)}
 .stockhead .ssym{font-size:15px;color:var(--tx2);font-weight:700}
 .stockhead .sprice{font-size:clamp(32px,5.5vw,42px);font-weight:850;letter-spacing:-.5px}
 .w52{margin-top:14px;max-width:520px}
-.w52 .wtrack{position:relative;height:8px;border-radius:5px;background:linear-gradient(90deg,rgba(244,93,93,.55),rgba(242,184,75,.5) 50%,rgba(49,197,115,.55))}
-.w52 .wmark{position:absolute;top:50%;width:13px;height:13px;border-radius:50%;background:#fff;border:3px solid #0a0e16;transform:translate(50%,-50%);box-shadow:0 1px 6px rgba(0,0,0,.5)}
+.w52 .wtrack{position:relative;height:8px;border-radius:5px;background:linear-gradient(90deg,rgba(248,113,113,.55),rgba(251,191,36,.5) 50%,rgba(74,222,128,.55))}
+.w52 .wmark{position:absolute;top:50%;width:13px;height:13px;border-radius:50%;background:#fff;border:3px solid #23232e;transform:translate(50%,-50%);box-shadow:0 1px 6px rgba(0,0,0,.5)}
 .w52 .wlbls{display:flex;justify-content:space-between;font-size:11.5px;color:var(--tx3);margin-top:6px;font-variant-numeric:tabular-nums}
 .legendrow{display:flex;flex-wrap:wrap;gap:14px;margin-top:10px;font-size:12.5px;color:var(--tx2)}
 .legendrow .li{display:inline-flex;align-items:center;gap:6px}
@@ -773,35 +835,35 @@ table.sortable thead th .arr{font-size:10px;color:var(--acc)}
 .legendrow .swd{width:16px;border-top:3px dashed}
 /* levels track */
 .lvl{position:relative;height:128px;margin:36px 10px 6px;direction:ltr}
-.lvl .basetrack{position:absolute;left:0;right:0;top:48px;height:12px;border-radius:6px;background:#1a2130}
-.lvl .bandseg{position:absolute;top:48px;height:12px;border-radius:6px;background:linear-gradient(90deg,rgba(49,197,115,.55),rgba(49,197,115,.3));border:1px solid rgba(49,197,115,.5)}
+.lvl .basetrack{position:absolute;left:0;right:0;top:48px;height:12px;border-radius:6px;background:#3a3a48}
+.lvl .bandseg{position:absolute;top:48px;height:12px;border-radius:6px;background:linear-gradient(90deg,rgba(74,222,128,.55),rgba(74,222,128,.3));border:1px solid rgba(74,222,128,.5)}
 .lvl .lmk{position:absolute;top:43px;width:2px;height:22px;background:var(--tx2)}
 .lvl .lmk span{position:absolute;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:11.5px;font-weight:700}
 .lvl .lmk.fair{background:var(--acc2)} .lvl .lmk.fair span{color:var(--acc2)}
 .lvl .lmk.exit{background:var(--down)} .lvl .lmk.exit span{color:var(--down)}
 .lvl .lmk.band{background:var(--up)} .lvl .lmk.band span{color:var(--up)}
-.lvl .pmark{position:absolute;top:45px;width:18px;height:18px;border-radius:50%;background:#fff;border:3px solid var(--acc);transform:translateX(-50%);box-shadow:0 0 0 5px rgba(77,163,255,.22);z-index:2}
+.lvl .pmark{position:absolute;top:45px;width:18px;height:18px;border-radius:50%;background:#fff;border:3px solid var(--acc);transform:translateX(-50%);box-shadow:0 0 0 5px rgba(94,160,247,.22);z-index:2}
 .lvl .pmark span{position:absolute;left:50%;transform:translateX(-50%);bottom:26px;white-space:nowrap;font-size:12.5px;font-weight:800;color:#fff;background:var(--acc);padding:3px 10px;border-radius:20px}
-.lvl .bandlbl{position:absolute;transform:translateX(-50%);font-size:11px;color:#8fe6b4;white-space:nowrap;font-weight:700}
+.lvl .bandlbl{position:absolute;transform:translateX(-50%);font-size:11px;color:#86efac;white-space:nowrap;font-weight:700}
 .kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px}
 .kv .card .v{font-size:19px}
-select{background:var(--panel);color:var(--tx);border:1px solid var(--line2);border-radius:10px;padding:9px 12px;font-size:15px;font-family:inherit}
-select:focus{outline:2px solid rgba(77,163,255,.5)}
+select{background:#3a3a48;color:var(--tx);border:1px solid var(--line2);border-radius:8px;padding:9px 12px;font-size:15px;font-family:inherit}
+select:focus{outline:2px solid rgba(94,160,247,.5)}
 .note{white-space:pre-wrap;line-height:1.65;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:15px 17px;font-size:14px}
 img.chart{max-width:100%;border-radius:var(--r-sm);display:block}
 .framecard{padding:12px}
 .framecard .cap{font-size:12.5px;color:var(--tx2);margin:2px 2px 9px;font-weight:600}
 /* ---------- daily ---------- */
 .datepills{display:flex;gap:7px;flex-wrap:wrap;margin:12px 0 4px}
-.datepills a{padding:6px 14px;border-radius:20px;border:1px solid var(--line2);color:var(--tx2);font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+.datepills a{padding:6px 14px;border-radius:8px;border:1px solid var(--line2);color:var(--tx2);font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
 .datepills a:hover{text-decoration:none;color:var(--tx);border-color:var(--acc)}
-.datepills a.on{background:#22314e;color:#fff;border-color:#3d5a80}
+.datepills a.on{background:rgba(94,160,247,.16);color:#fff;border-color:var(--acc)}
 .hl-item{display:flex;gap:11px;background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-inline-start:3px solid var(--acc);border-radius:var(--r-sm);padding:12px 15px;font-size:14.5px;line-height:1.6}
 .hl-num{flex:0 0 auto;width:24px;height:24px;border-radius:50%;background:var(--acc-bg);color:var(--acc2);font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center;margin-top:1px}
 .sechead{display:flex;align-items:center;gap:9px;margin:26px 0 6px}
 .sechead h2{margin:0;font-size:16px;font-weight:800}
 .srcdot{width:11px;height:11px;border-radius:4px;flex:0 0 auto}
-.count{font-size:11.5px;font-weight:700;background:var(--panel2);border:1px solid var(--line2);border-radius:12px;padding:1px 9px;color:var(--tx2)}
+.count{font-size:11.5px;font-weight:700;background:var(--panel2);border:1px solid var(--line2);border-radius:6px;padding:1px 9px;color:var(--tx2)}
 .ditem{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;margin:9px 0;transition:border-color .15s}
 .ditem:hover{border-color:var(--line2)}
 .ditem h3{margin:0 0 6px;font-size:15.5px;line-height:1.5}
@@ -816,7 +878,7 @@ img.chart{max-width:100%;border-radius:var(--r-sm);display:block}
   nav.mainnav{display:none}
   .clock{display:none}
   main{padding:14px 12px 96px}
-  .tabbar{display:flex;position:fixed;bottom:0;left:0;right:0;z-index:60;background:rgba(9,12,18,.94);backdrop-filter:blur(14px);border-top:1px solid var(--line);padding:6px 4px calc(6px + env(safe-area-inset-bottom))}
+  .tabbar{display:flex;position:fixed;bottom:0;left:0;right:0;z-index:60;background:rgba(30,30,40,.95);backdrop-filter:blur(14px);border-top:1px solid var(--line);padding:6px 4px calc(6px + env(safe-area-inset-bottom))}
   .tabbar a{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;color:var(--tx3);font-size:10.5px;font-weight:600;padding:5px 0 3px;border-radius:10px}
   .tabbar a.on{color:var(--acc2)}
   .tabbar a:hover{text-decoration:none}
@@ -828,7 +890,41 @@ img.chart{max-width:100%;border-radius:var(--r-sm);display:block}
   .stockhead{padding:15px 14px}
   th,td{padding:8px 8px}
 }
-:focus-visible{outline:2px solid rgba(77,163,255,.6);outline-offset:2px}
+:focus-visible{outline:2px solid rgba(94,160,247,.6);outline-offset:2px}
+.subtabs{display:flex;gap:8px;margin:0 0 12px;flex-wrap:wrap}
+.subtab{cursor:pointer;border:1px solid var(--line2);background:var(--panel2);color:var(--tx2);border-radius:8px;padding:7px 16px;font-size:13.5px;font-weight:700;font-family:inherit}
+.subtab.on{border-color:var(--acc);color:#fff;background:rgba(94,160,247,.16)}
+.ovrow{display:flex;gap:18px;justify-content:space-between}
+.ovcol{flex:1;min-width:0}
+.ovcol+.ovcol{border-inline-start:1px solid var(--line);padding-inline-start:18px}
+.ovbig{font-size:20px;font-weight:800;margin-top:4px}
+.ovline{font-size:12px;color:var(--tx3);margin-top:5px;line-height:1.5}
+.ovline b{color:var(--tx);font-size:13px}
+@media (max-width:760px){.ovrow{flex-direction:column;gap:12px}.ovcol+.ovcol{border-inline-start:none;padding-inline-start:0;border-top:1px solid var(--line);padding-top:12px}}
+.stackbar{display:flex;height:10px;border-radius:5px;overflow:hidden;background:#3a3a48;margin-top:10px}.stackbar>div{height:100%}
+.subrow{padding-inline-start:14px;margin:2px 0 12px}
+.housewrap{max-width:880px;margin:0 auto}
+.statgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:4px 0 12px}
+.stat .v{font-size:28px}
+.grad{background:linear-gradient(90deg,#5b8def,#8b5cf6);-webkit-background-clip:text;background-clip:text;color:transparent}
+@media (max-width:760px){.statgrid{grid-template-columns:repeat(2,1fr)}}
+.cfghead{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.cfghead .s{font-size:13px;color:var(--tx2);font-weight:600}
+.cfgtools{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.cfgchk{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:700;color:var(--tx2);cursor:pointer}
+.cfgchk input{width:15px;height:15px;accent-color:var(--acc)}
+.toolbtn{padding:4px 9px;border-radius:6px;border:1px solid var(--line2);background:transparent;color:var(--tx2);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
+.toolbtn:hover{border-color:var(--acc);color:var(--tx)}
+.pricegroup{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border:1px solid var(--line);border-radius:8px;background:var(--panel3);padding:6px 12px;margin-top:14px}
+.pricegroup:focus-within{border-color:var(--acc)}
+.pricegroup .s{font-size:13px;color:var(--tx2);font-weight:600}
+.pricegroup input[type=number]{background:transparent;border:none;outline:none;color:var(--tx);font-size:15px;font-weight:700;width:110px;font-family:inherit;padding:4px 0}
+.vsep{width:1px;align-self:stretch;background:var(--line2)}
+.ovsum{font-size:13px;color:var(--tx2);margin-top:12px;padding-top:10px;border-top:1px solid var(--line);line-height:1.7}
+.ovsum b{color:var(--tx)}
+.savebtn{display:block;width:100%;margin-top:12px;padding:10px;border-radius:10px;border:1px solid var(--acc);background:rgba(94,160,247,.12);color:var(--acc2);font-size:14px;font-weight:700;cursor:pointer}
+.savebtn:hover{background:rgba(94,160,247,.22)}
+.savebtn:disabled{opacity:.6;cursor:default}
 </style>"""
 
 JS = """<script>
@@ -957,7 +1053,7 @@ JS = """<script>
     }
     function draw() {
       var s = rangeStart(curRange);
-      var series = [{name: 'התיק', color: '#4da3ff', width: 2.6, vals: seriesPct(pd.pf, s)}];
+      var series = [{name: 'התיק', color: '#5ea0f7', width: 2.6, vals: seriesPct(pd.pf, s)}];
       Object.keys(pd.indices).forEach(function(sym) {
         if (!onIdx[sym]) return;
         var ix = pd.indices[sym];
@@ -977,14 +1073,14 @@ JS = """<script>
       for (var g = g0; g <= mx; g += step) {
         var gy = Y(g);
         var zero = Math.abs(g) < 1e-9;
-        svg += "<line x1='" + CH.pl + "' y1='" + gy.toFixed(1) + "' x2='" + (W - CH.pr) + "' y2='" + gy.toFixed(1) + "' stroke='" + (zero ? '#3a4a66' : '#1d2637') + "' stroke-width='" + (zero ? 1.4 : 1) + "'/>";
-        svg += "<text x='" + (W - CH.pr + 8) + "' y='" + (gy + 4).toFixed(1) + "' fill='#8b98ad' font-size='12' text-anchor='start' direction='ltr'>" + (g > 0 ? '+' : '') + g.toFixed(0) + "%</text>";
+        svg += "<line x1='" + CH.pl + "' y1='" + gy.toFixed(1) + "' x2='" + (W - CH.pr) + "' y2='" + gy.toFixed(1) + "' stroke='" + (zero ? '#4a4a58' : '#3a3a48') + "' stroke-width='" + (zero ? 1.4 : 1) + "'/>";
+        svg += "<text x='" + (W - CH.pr + 8) + "' y='" + (gy + 4).toFixed(1) + "' fill='#9ca3af' font-size='12' text-anchor='start' direction='ltr'>" + (g > 0 ? '+' : '') + g.toFixed(0) + "%</text>";
       }
       var ticks = 5;
       for (var t = 0; t < ticks; t++) {
         var ti = Math.round(t * (n - 1) / (ticks - 1));
         var ds = pd.dates[s + ti];
-        svg += "<text x='" + X(ti).toFixed(1) + "' y='" + (H - 8) + "' fill='#8b98ad' font-size='12' text-anchor='middle'>" + ds.slice(8, 10) + '/' + ds.slice(5, 7) + "</text>";
+        svg += "<text x='" + X(ti).toFixed(1) + "' y='" + (H - 8) + "' fill='#9ca3af' font-size='12' text-anchor='middle'>" + ds.slice(8, 10) + '/' + ds.slice(5, 7) + "</text>";
       }
       series.forEach(function(x) {
         var pts = x.vals.map(function(v, i) { return X(i).toFixed(1) + ',' + Y(v).toFixed(1); }).join(' ');
@@ -1046,9 +1142,9 @@ JS = """<script>
 </script>"""
 
 LOGO_SVG = ("<svg width='26' height='26' viewBox='0 0 26 26' aria-hidden='true'>"
-            "<rect x='1' y='1' width='24' height='24' rx='7' fill='#14213a' stroke='#2c3a55'/>"
-            "<polyline points='5,17 10,11 14,14 21,6' fill='none' stroke='#4da3ff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/>"
-            "<circle cx='21' cy='6' r='2.2' fill='#31c573'/></svg>")
+            "<rect x='1' y='1' width='24' height='24' rx='7' fill='#2e2e3a' stroke='#3a3a48'/>"
+            "<polyline points='5,17 10,11 14,14 21,6' fill='none' stroke='#5ea0f7' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/>"
+            "<circle cx='21' cy='6' r='2.2' fill='#4ade80'/></svg>")
 
 def _tabicon(kind):
     paths = {
@@ -1067,7 +1163,7 @@ NAV = [("/", "מצב התיק"), ("/positions", "פירוט פוזיציות"), 
 def layout(title, nav, body, asof=""):
     tabs = "".join("<a href='%s' class='%s'>%s<span>%s</span></a>" % (h, "on" if h == nav else "", _tabicon(TABICONS[h]), t) for h, t in NAV)
     return ("<!doctype html><html lang='he' dir='rtl'><head><meta charset='utf-8'>"
-            "<meta name='viewport' content='width=device-width,initial-scale=1'><meta name='theme-color' content='#07090d'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'><meta name='theme-color' content='#23232e'>"
             "<meta name='color-scheme' content='dark'><title>" + esc(title) + " · תיק ההשקעות</title>" + CSS + "</head><body>"
             "<header><div class='hwrap'><span class='brand'>" + LOGO_SVG + "תיק ההשקעות</span><nav class='mainnav'>"
             + "".join("<a href='%s' class='%s'>%s</a>" % (h, "on" if h == nav else "", t) for h, t in NAV)
@@ -1117,14 +1213,14 @@ def nav_area_svg(series, w=760, h=205):
     area = "M%.1f,%.1f L%s L%.1f,%.1f Z" % (X(0), bot, " L".join("%.1f,%.1f" % (X(i), Y(v)) for i, (_, v) in enumerate(pts)), X(len(pts) - 1), bot)
     grid = ""
     for gv in (mx, (mx + mn) / 2, mn):
-        grid += "<line x1='6' x2='%d' y1='%.1f' y2='%.1f' stroke='#1c2536' stroke-width='1'/><text class='axislbl' x='%d' y='%.1f' text-anchor='end'>%s</text>" % (w - 6, Y(gv), Y(gv), w - 9, Y(gv) - 3, fmtk(gv))
+        grid += "<line x1='6' x2='%d' y1='%.1f' y2='%.1f' stroke='#3a3a48' stroke-width='1'/><text class='axislbl' x='%d' y='%.1f' text-anchor='end'>%s</text>" % (w - 6, Y(gv), Y(gv), w - 9, Y(gv) - 3, fmtk(gv))
     data = json.dumps([[dstr(d), fmt(v, 0), round(Y(v), 1)] for d, v in pts])
     return ("<div class='chartwrap'><svg data-pts='%s' viewBox='0 0 %d %d' style='direction:ltr' role='img' aria-label='גרף שווי נקי'>"
             "<defs><linearGradient id='navg' x1='0' y1='0' x2='0' y2='1'>"
-            "<stop offset='0' stop-color='#4da3ff' stop-opacity='0.34'/><stop offset='1' stop-color='#4da3ff' stop-opacity='0.02'/></linearGradient></defs>"
-            "%s<path d='%s' fill='url(#navg)'/><polyline points='%s' fill='none' stroke='#4da3ff' stroke-width='2.2' stroke-linejoin='round'/>"
-            "<line class='ch-line' y1='%d' y2='%d' stroke='#7cc4ff' stroke-width='1' stroke-dasharray='3 3' style='opacity:0'/>"
-            "<circle class='ch-dot' r='4' fill='#7cc4ff' stroke='#0a0e16' stroke-width='2' style='opacity:0'/>"
+            "<stop offset='0' stop-color='#5ea0f7' stop-opacity='0.34'/><stop offset='1' stop-color='#5ea0f7' stop-opacity='0.02'/></linearGradient></defs>"
+            "%s<path d='%s' fill='url(#navg)'/><polyline points='%s' fill='none' stroke='#5ea0f7' stroke-width='2.2' stroke-linejoin='round'/>"
+            "<line class='ch-line' y1='%d' y2='%d' stroke='#7db4f9' stroke-width='1' stroke-dasharray='3 3' style='opacity:0'/>"
+            "<circle class='ch-dot' r='4' fill='#7db4f9' stroke='#23232e' stroke-width='2' style='opacity:0'/>"
             "<text class='axislbl' x='8' y='%d'>%s</text><text class='axislbl' x='%d' y='%d' text-anchor='end'>%s</text></svg>"
             "<div class='chtip'></div></div>"
             % (esc(data), w, h, grid, area, line, top, bot, bot + 17, dstr(pts[0][0]), w - 8, bot + 17, dstr(pts[-1][0])))
@@ -1249,7 +1345,7 @@ def price_chart_svg(q, it, w=760, h=300):
     for s in (s150, s200): cand += [v for v in s if v]
     mn, mx = min(cand), max(cand); rng = (mx - mn) or 1.0
     lvls = []
-    for v, lbl, col in [(fair, "הוגן", "#7cc4ff"), (entry, entry_label(it), "#31c573"), (bot, "תחתית רצועה", "#31c573"), (exitp, "יציאה", "#f45d5d")]:
+    for v, lbl, col in [(fair, "הוגן", "#7db4f9"), (entry, entry_label(it), "#4ade80"), (bot, "תחתית רצועה", "#4ade80"), (exitp, "יציאה", "#f87171")]:
         if v and mn - rng * 0.18 <= v <= mx + rng * 0.18: lvls.append((v, lbl, col))
     for v, _, _ in lvls: mn = min(mn, v); mx = max(mx, v)
     pad = (mx - mn) * 0.07 or 1.0; lo, hi = mn - pad, mx + pad
@@ -1262,7 +1358,7 @@ def price_chart_svg(q, it, w=760, h=300):
     area = "M%.1f,%.1f L%s L%.1f,%.1f Z" % (X(0), boty, " L".join("%.1f,%.1f" % (X(i), Y(v)) for i, v in enumerate(win)), X(len(win) - 1), boty)
     grid = ""
     for gv in (mx, (mx + mn) / 2, mn):
-        grid += "<line x1='6' x2='%d' y1='%.1f' y2='%.1f' stroke='#1c2536'/><text class='axislbl' x='%d' y='%.1f' text-anchor='end'>%s</text>" % (w - 6, Y(gv), Y(gv), w - 9, Y(gv) - 3, fmt(gv, 0))
+        grid += "<line x1='6' x2='%d' y1='%.1f' y2='%.1f' stroke='#3a3a48'/><text class='axislbl' x='%d' y='%.1f' text-anchor='end'>%s</text>" % (w - 6, Y(gv), Y(gv), w - 9, Y(gv) - 3, fmt(gv, 0))
     lvl_svg = ""
     for v, lbl, col in lvls:
         lvl_svg += ("<line x1='6' x2='%d' y1='%.1f' y2='%.1f' stroke='%s' stroke-width='1.2' stroke-dasharray='6 4' opacity='0.75'/>"
@@ -1273,14 +1369,14 @@ def price_chart_svg(q, it, w=760, h=300):
         except Exception: return d or ""
     svg = ("<svg viewBox='0 0 %d %d' style='direction:ltr' role='img' aria-label='גרף מחיר'>"
            "<defs><linearGradient id='pg' x1='0' y1='0' x2='0' y2='1'>"
-           "<stop offset='0' stop-color='#4da3ff' stop-opacity='0.26'/><stop offset='1' stop-color='#4da3ff' stop-opacity='0.02'/></linearGradient></defs>"
+           "<stop offset='0' stop-color='#5ea0f7' stop-opacity='0.26'/><stop offset='1' stop-color='#5ea0f7' stop-opacity='0.02'/></linearGradient></defs>"
            "%s<path d='%s' fill='url(#pg)'/>%s%s%s%s"
            "<text class='axislbl' x='8' y='%d'>%s</text><text class='axislbl' x='%d' y='%d' text-anchor='end'>%s</text></svg>"
-           % (w, h, grid, area, lvl_svg, pline(s200, "#c792ea", 1.4), pline(s150, "#f2b84b", 1.4), pline(win, "#4da3ff", 2.1),
+           % (w, h, grid, area, lvl_svg, pline(s200, "#8b5cf6", 1.4), pline(s150, "#fbbf24", 1.4), pline(win, "#5ea0f7", 2.1),
               boty + 17, dfmt(wdates[0]), w - 8, boty + 17, dfmt(wdates[-1])))
-    legend = ("<div class='legendrow'><span class='li'><span class='sw' style='background:#4da3ff'></span>מחיר</span>"
-              "<span class='li'><span class='sw' style='background:#f2b84b'></span>ממוצע 150</span>"
-              "<span class='li'><span class='sw' style='background:#c792ea'></span>ממוצע 200</span>"
+    legend = ("<div class='legendrow'><span class='li'><span class='sw' style='background:#5ea0f7'></span>מחיר</span>"
+              "<span class='li'><span class='sw' style='background:#fbbf24'></span>ממוצע 150</span>"
+              "<span class='li'><span class='sw' style='background:#8b5cf6'></span>ממוצע 200</span>"
               + "".join("<span class='li'><span class='swd' style='border-color:%s'></span>%s %s</span>" % (c, esc(l), fmt(v)) for v, l, c in lvls) + "</div>")
     return svg, legend
 
@@ -1311,6 +1407,11 @@ def page_home():
                 flex_pos[norm(p["symbol"])] = p
                 if p.get("unreal") is not None: flex_unreal[norm(p["symbol"])] = p["unreal"]
     def qty(it):
+        # Flex daily is the source of truth: a symbol absent from a non-empty
+        # daily file was sold — the old seed fallback kept showing it (AMZN /
+        # AVGO still displayed after the 18/11/2026 sale).
+        if fd and fd.get("daily") and fd["daily"].get("positions"):
+            return flex_qty.get(norm(it["symbol"]), 0)
         return flex_qty.get(norm(it["symbol"]), it.get("shares"))
     def val(it):
         q = qs.get(it["symbol"]); n = qty(it)
@@ -1336,21 +1437,24 @@ def page_home():
         ytd_prof = None; ytd_gross = None
     cs = chart_series()
     ytd_ppct = (cs["pf"][-1] / cs["pf"][0] - 1) * 100 if cs and cs.get("pf") else None
-    # (a) hero + NAV chart
-    hero = "<div class='hero'><div class='t'>מה שווי התיק?</div>"
-    if daily:
-        hero += "<div class='v num'>%s</div><div class='sub'>שווי נקי ב־Interactive Brokers · דוח Flex %s</div>" % (
-            fmt(daily["total"], 0), dstr(daily["date"]))
-    else:
-        hero += "<div class='v num'>%s</div><div class='sub'>שווי מחושב חי (אין נתוני Flex זמינים)</div>" % fmt(total_live, 0)
-    hero += ("<div class='dayline'>היום (מחושב ממחירים חיים): <span class='pill %s'>%s · %s</span></div>"
-             % (cls(day_usd), fmt(day_usd, 0), pct(day_pct_live)))
-    if ytd_gross is not None:
-        hero += ("<div class='dayline'>רווח מפתיחת התיק: <span class='pill %s'>%s · %s TWR</span> <span class='muted'>(נטו %s)</span></div>"
-                 % (cls(ytd_gross), fmt(ytd_gross, 0), pct(ytd_ppct) if ytd_ppct is not None else "—", fmt(ytd_prof, 0) if ytd_prof is not None else "—"))
-    # one chart on the home page, not two (Oren, 8/11/2026): the hero NAV area chart is gone;
-    # the interactive returns chart (portfolio TWR vs indices) is the single chart.
-    hero += "</div>"
+    # (a) Snowball-style stat cards row: value / total profit / today / YTD TWR
+    nav_val = daily["total"] if daily else total_live
+    nav_sub = ("שווי נקי · Flex %s" % dstr(daily["date"])) if daily else "שווי מחושב חי (אין נתוני Flex)"
+    stats_html = "<div class='statgrid'>"
+    stats_html += ("<div class='card stat'><div class='t'>שווי התיק</div><div class='v num'>%s</div>"
+                   "<div class='s'>%s</div></div>" % (fmt(nav_val, 0), nav_sub))
+    stats_html += ("<div class='card stat'><div class='t'>רווח כולל</div><div class='v num %s'>%s</div>"
+                   "<div class='s'>%s TWR מפתיחת התיק</div></div>"
+                   % (cls(ytd_gross) if ytd_gross is not None else "", fmt(ytd_gross, 0) if ytd_gross is not None else "—",
+                      pct(ytd_ppct) if ytd_ppct is not None else "—"))
+    stats_html += ("<div class='card stat'><div class='t'>היום</div><div class='v num %s'>%s</div>"
+                   "<div class='s'>%s · מחירים חיים</div></div>"
+                   % (cls(day_usd), fmt(day_usd, 0), pct(day_pct_live) if day_pct_live is not None else "—"))
+    stats_html += ("<div class='card stat'><div class='t'>תשואה מתחילת השנה</div><div class='v num %s'>%s</div>"
+                   "<div class='s'>רווח נטו %s</div></div>"
+                   % (cls(ytd_ppct) if ytd_ppct is not None else "", pct(ytd_ppct) if ytd_ppct is not None else "—",
+                      fmt(ytd_prof, 0) if ytd_prof is not None else "—"))
+    stats_html += "</div>"
     # (b) performance — portfolio vs indices, one interactive chart (IB-style)
     # cs was computed above (the hero needs its TWR too).
     perf_html = "<h2 class='sec'>איך התיק מול המדדים?</h2>"
@@ -1374,12 +1478,12 @@ def page_home():
     alloc_html = "<h2 class='sec'>הקצאה ורווח</h2><div class='grid g-2'>"
     if total_live:
         sp = stock_val / total_live * 100; op = opt_val / total_live * 100
-        donut = donut_svg([(stock_val, "#4da3ff"), (opt_val, "#c792ea")])
-        legend = ("<div class='lrow'><span class='sw' style='background:#4da3ff'></span>מניות<span class='lp'>%.1f%%</span><span class='lv'>%s</span></div>"
-                  "<div class='lrow'><span class='sw' style='background:#c792ea'></span>אופציות LEAPS<span class='lp'>%.1f%%</span><span class='lv'>%s</span></div>"
+        donut = donut_svg([(stock_val, "#5ea0f7"), (opt_val, "#8b5cf6")])
+        legend = ("<div class='lrow'><span class='sw' style='background:#5ea0f7'></span>מניות<span class='lp'>%.1f%%</span><span class='lv'>%s</span></div>"
+                  "<div class='lrow'><span class='sw' style='background:#8b5cf6'></span>אופציות LEAPS<span class='lp'>%.1f%%</span><span class='lv'>%s</span></div>"
                   % (sp, fmt(stock_val, 0), op, fmt(opt_val, 0)))
         if daily:
-            legend += ("<div class='lrow'><span class='sw' style='background:#f45d5d'></span>מזומן / מרג'ין<span class='lp'></span><span class='lv'>%s</span></div>"
+            legend += ("<div class='lrow'><span class='sw' style='background:#f87171'></span>מזומן / מרג'ין<span class='lp'></span><span class='lv'>%s</span></div>"
                        % fmt(daily["cash"], 0))
         alloc_html += ("<div class='card'><div class='t'>איך מחולק התיק?</div><div class='donut-flex' style='margin-top:10px'>"
                        "<div class='donutwrap'>%s<div class='donut-c'><div class='dv'>%s</div><div class='dt'>מניות + אופציות</div></div></div>"
@@ -1431,14 +1535,14 @@ def page_home():
             alloc_html += ("<div class='card xcard' data-exp='profit-detail' tabindex='0' role='button' aria-expanded='false'>"
                            "<div class='t' style='display:flex;align-items:center;justify-content:space-between'><span>כמה הרווחתי מפתיחת התיק?</span>%s</div>"
                            "<div class='v %s'>%s</div>"
-                           "<div class='s'>ממומש %s · לא ממומש %s</div>"
-                           "<div class='s'>רווח נטו: <b class='%s'>%s</b> · %s TWR%s</div></div>"
-                           % (chev, cls(gross), fmt(gross, 0), fmt(realized, 0), fmt(unreal_now, 0), cls(prof), fmt(prof, 0), pct(ppct) if ppct is not None else "—",
+                           "<div class='s'>ממומש <span dir='ltr' class='%s'>%s</span> · לא ממומש <span dir='ltr' class='%s'>%s</span></div>"
+                           "<div class='s'>רווח נטו: <b dir='ltr' class='%s'>%s</b> · <span dir='ltr'>%s TWR</span>%s</div></div>"
+                           % (chev, cls(gross), fmt(gross, 0), cls(realized), fmt(realized, 0), cls(unreal_now), fmt(unreal_now, 0), cls(prof), fmt(prof, 0), pct(ppct) if ppct is not None else "—",
                               " · פירוט בלחיצה" if profit_panel else ""))
         else:
             alloc_html += ("<div class='card xcard' data-exp='profit-detail' tabindex='0' role='button' aria-expanded='false'>"
                            "<div class='t' style='display:flex;align-items:center;justify-content:space-between'><span>כמה הרווחתי מפתיחת התיק?</span>%s</div>"
-                           "<div class='v %s'>%s</div><div class='s'>%s TWR מפתיחת התיק</div>"
+                           "<div class='v %s'>%s</div><div class='s'><span dir='ltr'>%s TWR</span> מפתיחת התיק</div>"
                            "<div class='s'>%s%s</div></div>"
                            % (chev, cls(prof), fmt(prof, 0), pct(ppct) if ppct is not None else "—", flows_line,
                               " · פירוט בלחיצה" if profit_panel else ""))
@@ -1446,7 +1550,7 @@ def page_home():
             alloc_html += ("<div class='card xcard' data-exp='profit-detail' tabindex='0' role='button' aria-expanded='false'>"
                            "<div class='t' style='display:flex;align-items:center;justify-content:space-between'><span>כמה הפקדתי וכמה משכתי?</span>%s</div>"
                            "<div class='v %s'>%s</div>"
-                           "<div class='s'>הופקד %s · נמשך %s</div>"
+                           "<div class='s'>הופקד <span dir='ltr'>%s</span> · נמשך <span dir='ltr'>%s</span></div>"
                            "<div class='s'>הופקד %s · נמשך %s · פירוט בלחיצה</div></div>"
                            % (chev, cls(dep_ils - wd_ils), fmt_ils(dep_ils - wd_ils), fmt_ils(dep_ils), fmt_ils(-wd_ils),
                               fmt(dep_usd, 0), fmt(wd_usd, 0)))
@@ -1587,6 +1691,7 @@ def page_home():
     # mini positions — expandable inline (accordion panel per position, screenshots only)
     rows = ""; mrows = []; mcards = []
     for n, i in enumerate(POS):
+        if not qty(i): continue  # sold — absent from the Flex daily file
         q = qs.get(i["symbol"]); v = val(i)
         se = since_entry_pct(i["symbol"], q["price"] if q else None, flex_pos)
         mrows.append((v, ("<tr class='posrow' data-exp='posp-%d' tabindex='0' role='button' aria-expanded='false'><td><a class='sym' href='/garp?s=%s'><b>%s</b></a></td><td>%s</td><td>%s</td>"
@@ -1643,7 +1748,7 @@ def page_home():
     mini = ("<h2 class='sec'>מה יש לי בתיק?</h2><div class='tblwrap mini-tbl'><table><thead><tr><th>סימול</th><th>שם</th><th>כמות</th><th>יום</th><th>מאז כניסה</th><th>מחיר</th><th>שווי</th><th data-sort='no'>מגמה 30 יום</th><th data-sort='no'></th></tr></thead><tbody>"
             + rows + "</tbody></table></div><div class='poscards'>" + cards + "</div><p><a href='/positions'>לכל הפירוט ←</a></p>")
     asof = "מחירים: Yahoo " + time.strftime("%H:%M %d/%m") + " (מטמון 10 דק׳) · Flex: " + (daily["file"] if daily else "—")
-    return layout("מצב התיק", "/", snap_html + hero + perf_html + alloc_html + exp_html + mini + strip, asof)
+    return layout("מצב התיק", "/", stats_html + perf_html + alloc_html + mini + snap_html + exp_html + strip, asof)
 
 def purchase_tax(price):
     tax = 0.0; prev = 0
@@ -1671,6 +1776,10 @@ def page_house():
     ils_rate = ils["price"] if ils else None
     meta_q = get_quote("META")
     meta_live = meta_q["price"] if meta_q and meta_q.get("price") else RSU_PRICE_USD  # live price for the reset button
+    dfl = load_house_defaults()  # user-saved defaults from the site (house_defaults.json)
+    meta_override = _def_bool(dfl, "meta_override", False)
+    meta_saved = _def_num(dfl, "meta_price", RSU_PRICE_USD)
+    meta_price = meta_saved if meta_override else meta_live  # override on: saved price; off: live price every load (Oren, 18/11/2026)
     # portfolio net after loans (Norton excluded — informational only, Oren 8/11/2026)
     pf_planit_loans = PLANIT_LOANS_ILS - NORTON_LOAN_ILS
     total_loans = pf_planit_loans + TESLA_LOAN_BAL_ILS
@@ -1682,28 +1791,54 @@ def page_house():
         prof = (ytd_srs[-1][1] - ytd_srs[0][1] - sum(fd["ytd"]["flows"].values())) if ytd_srs else None
         tax_ils = (prof * 0.25 * ils_rate) if (prof is not None and ils_rate) else None
         net_after_tax = (pf_ils - total_loans - tax_ils) if tax_ils is not None else None
-    rsu_net_ils = (rsu_net_usd(RSU_PRICE_USD) * ils_rate) if ils_rate else None
+    rsu_net_ils = (rsu_net_usd(meta_price) * ils_rate) if ils_rate else None
     if daily is None or ils_rate is None or rsu_net_ils is None:
         return layout("רכישת בית", "/house",
                       "<h2 class='sec'>מזומן זמין לרכישת בית</h2><div class='card'><div class='t'>נתונים חסרים</div><div class='s'>לא הצלחתי לטעון את נתוני Flex או את שער הדולר — נסה לרענן בעוד כמה דקות.</div></div>", "")
     asof = "Flex %s · שער דולר %.3f · RSU נכון ל־%s" % (dstr(daily["date"]), ils_rate, RSU_ASOF)
     # portfolio counts AFTER capital gains tax; RSU at the default realization % (Oren, 10/11/2026)
     pf_net = net_after_tax if net_after_tax is not None else net_ils
-    rsu_realized_ils = rsu_net_ils * RSU_PCT_DEFAULT / 100.0
+    dfl = load_house_defaults()  # user-saved defaults from the site (house_defaults.json)
+    rsu_pct = _def_num(dfl, "rsu_pct", RSU_PCT_DEFAULT, 0.0, 100.0)
+    home_val = _def_num(dfl, "home_val", HOME_VALUE_ILS)
+    mortgage_val = _def_num(dfl, "mortgage", MORTGAGE_ILS)
+    ramat_amt = _def_num(dfl, "ramat_amount", RAMAT_HASHARON_ILS)
+    ramat_incl = _def_bool(dfl, "ramat_incl", False)
+    rsu_realized_ils = rsu_net_ils * rsu_pct / 100.0
     rsu_shares = sum(sh for _, sh, _ in RSU_GRANTS)
-    rsu_total_usd = rsu_shares * RSU_PRICE_USD  # gross value of all shares
+    rsu_total_usd = rsu_shares * meta_price  # gross value of all shares
     rsu_total_ils = (rsu_total_usd * ils_rate) if ils_rate else None
-    rsu_gross_realized_ils = (rsu_total_ils * RSU_PCT_DEFAULT / 100.0) if rsu_total_ils is not None else None
-    total = rsu_realized_ils + pf_net + (HOME_VALUE_ILS - MORTGAGE_ILS)
-    inp = "width:100%;padding:9px 10px;border-radius:10px;border:1px solid var(--line2);background:var(--panel3);color:var(--tx);font-size:15px"
+    rsu_gross_realized_ils = (rsu_total_ils * rsu_pct / 100.0) if rsu_total_ils is not None else None
+    total = rsu_realized_ils + pf_net + (home_val - mortgage_val)
+    inp = "width:100%;max-width:280px;padding:9px 10px;border-radius:10px;border:1px solid var(--line2);background:var(--panel3);color:var(--tx);font-size:15px"
     chev = "<svg class='chev' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='M5 9 L12 16 L19 9'/></svg>"
     # purchase costs + top-up mortgage (Oren, 10/11/2026)
-    buy_price = PURCHASE_PRICE_DEFAULT
+    buy_price = _def_num(dfl, "buy_price", PURCHASE_PRICE_DEFAULT)
+    reno_cost = _def_num(dfl, "reno_cost", RENOVATION_ILS)
+    reno_incl = _def_bool(dfl, "reno_incl", True)
     broker_fee = buy_price * BROKER_PCT * (1 + VAT_RATE)
     lawyer_fee = buy_price * LAWYER_PCT * (1 + VAT_RATE)
     ptax = purchase_tax(buy_price)
-    total_cost = buy_price + broker_fee + lawyer_fee + ptax + RENOVATION_ILS
-    mtg = max(0.0, total_cost - total)
+    total_cost = buy_price + broker_fee + lawyer_fee + ptax + (reno_cost if reno_incl else 0)
+    bridge_amt = _def_num(dfl, "bridge_amount", BRIDGE_MAX_TRACK_ILS // 2, 0.0, float(BRIDGE_MAX_TRACK_ILS))  # saved default, else 50% of max (Oren, 18/11/2026); JS upd() takes over from the input
+    bridge_pct = int(round(bridge_amt * 100.0 / BRIDGE_MAX_TRACK_ILS)) if BRIDGE_MAX_TRACK_ILS else 0
+    # long-term wealth remaining after the house purchase (Oren, 19/11/2026):
+    # hishtalmut/gemel funds + Meta shares NOT realized + new NVIDIA grant, less the bridge taken
+    # long-term figures are fixed data, not user-overridable (Oren, 19/11/2026):
+    # funds from the Planit reports, NVIDIA grant from the contract;
+    # the bridge is NOT deducted here — it is repaid from the Ramat Hasharon sale
+    lt_funds = BRIDGE_BASE_ILS
+    lt_nvidia = NVIDIA_GRANT_ILS
+    lt_nvidia_net = lt_nvidia * (1.0 - NVIDIA_GRANT_TAX_PCT / 100.0)
+    lt_meta_ils = rsu_net_ils * (100.0 - rsu_pct) / 100.0
+    lt_total = lt_funds + lt_meta_ils + lt_nvidia_net
+    lt_bar_f = lt_funds / lt_total * 100.0 if lt_total > 0 else 0
+    lt_bar_m = lt_meta_ils / lt_total * 100.0 if lt_total > 0 else 0
+    lt_bar_n = lt_nvidia_net / lt_total * 100.0 if lt_total > 0 else 0
+    cash_bar_r = rsu_realized_ils / total * 100.0 if total > 0 else 0
+    cash_bar_p = pf_net / total * 100.0 if total > 0 else 0
+    cash_bar_e = (home_val - mortgage_val + (ramat_amt if ramat_incl else 0)) / total * 100.0 if total > 0 else 0
+    mtg = max(0.0, total_cost - total - bridge_amt)
     prime_rate = PRIME_RATE + PRIME_SPREAD  # 4.00% (prime 4.75% - 0.75)
     share = mtg / 3.0  # equal-thirds mix (Oren, 10/11/2026)
     prime_pay, prime_int, prime_tot = _mtg_row(share, prime_rate)
@@ -1712,25 +1847,39 @@ def page_house():
     mix_pay = prime_pay + fixed_pay + var_pay
     mix_int = prime_int + fixed_int + var_int
     mix_tot = prime_tot + fixed_tot + var_tot
-    purch_html = (
-        "<h2 class='sec'>עלות רכישה</h2>"
+    cost_html = (
         "<div class='card' style='margin-bottom:12px'>"
         "<div class='t'>עלות כוללת של רכישה</div>"
         "<div class='v' id='cost-total' dir='ltr'>" + fmt_ils(total_cost) + "</div>"
         "</div>"
-        "<div class='card' style='margin-bottom:12px'><div class='t'>מחיר רכישה מבוקש</div>"
-        "<input type='number' id='buy-price' value='" + str(PURCHASE_PRICE_DEFAULT) + "' step='50000' min='0' inputmode='numeric' style='" + inp + ";margin-top:8px' dir='ltr'>"
-        "<div style='height:10px'></div>"
-        "<div class='s' style='margin:10px 0 4px'>שיפוץ (₪)</div>"
-        "<input type='number' id='reno-cost' value='" + str(RENOVATION_ILS) + "' step='10000' min='0' inputmode='numeric' style='" + inp + "' dir='ltr'>"
-        "<label style='display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;font-weight:700;cursor:pointer'><input type='checkbox' id='reno-incl' checked style='width:16px;height:16px;accent-color:var(--acc)'> לכלול שיפוץ בעלות הרכישה</label>"
+        "<div class='card' style='margin-bottom:12px'>"
+        "<div class='cfghead'><span class='s'>מחיר רכישה מבוקש (₪)</span></div>"
+        "<input type='number' id='buy-price' value='" + str(int(buy_price)) + "' step='50000' min='0' inputmode='numeric' style='" + inp + ";margin-top:6px' dir='ltr'>"
+        "<div class='cfghead' style='margin-top:12px'><span class='s'>שיפוץ (₪)</span></div>"
+        "<input type='number' id='reno-cost' value='" + str(int(reno_cost)) + "' step='10000' min='0' inputmode='numeric' style='" + inp + ";margin-top:6px' dir='ltr'>"
+        "<div class='cfghead' style='margin-top:12px'><label class='cfgchk' style='font-size:13px'><input type='checkbox' id='reno-incl'" + (" checked" if reno_incl else "") + "> לכלול שיפוץ בעלות הרכישה</label></div>"
+        "<button type='button' class='savebtn' data-save='cost'>שמור נתונים</button>"
+        "</div>"
+        "<div class='card' style='margin-bottom:12px'><div class='t'>פירוט העלות</div>"
         "<div class='drow'><span class='dl'>מחיר רכישה</span><span class='dv' dir='ltr' id='cost-price'>" + fmt_ils(buy_price) + "</span></div>"
         "<div class='drow'><span class='dl'>תיווך <span class='muted'>(2% + מע״מ 18%)</span></span><span class='dv' dir='ltr' id='cost-broker'>" + fmt_ils(broker_fee) + "</span></div>"
         "<div class='drow'><span class='dl'>שכ״ט עו״ד <span class='muted'>(0.5% + מע״מ 18%)</span></span><span class='dv' dir='ltr' id='cost-lawyer'>" + fmt_ils(lawyer_fee) + "</span></div>"
         "<div class='drow'><span class='dl'>מס רכישה <span class='muted'>(דירה יחידה, מדרגות 2026)</span></span><span class='dv' dir='ltr' id='cost-tax'>" + fmt_ils(ptax) + "</span></div>"
-        "<div class='drow'><span class='dl'>שיפוץ</span><span class='dv' dir='ltr' id='cost-reno'>" + fmt_ils(RENOVATION_ILS) + "</span></div>"
+        "<div class='drow'><span class='dl'>שיפוץ</span><span class='dv' dir='ltr' id='cost-reno'>" + fmt_ils(reno_cost if reno_incl else 0) + "</span></div>"
         "<div class='s'>מזומן זמין: <b id='cost-cash'>" + fmt_ils(total) + "</b> · פער למימון: <b id='cost-gap'>" + fmt_ils(mtg) + "</b></div></div>"
-        "<h2 class='sec'>משכנתא</h2>"
+    )
+    fin_html = (
+        "<div class='card' style='margin-bottom:12px'><div class='t'>גישור מקרנות השתלמות / גמל</div>"
+        "<div class='s'>מקסימום אחרי ניכוי נורטון (₪475,000): 50% שטוח <b dir='ltr'>" + fmt_ils(BRIDGE_MAX_FLAT_ILS) + "</b> (החזר <b dir='ltr'>" + fmt_ils(BRIDGE_MAX_FLAT_PAY_ILS) + "</b> /חודש) · 50/70 <b dir='ltr'>" + fmt_ils(BRIDGE_MAX_TRACK_ILS) + "</b> (החזר <b dir='ltr'>" + fmt_ils(BRIDGE_MAX_TRACK_PAY_ILS) + "</b> /חודש)</div>"
+        "<div class='s' style='margin:10px 0 6px'>אחוז מהגישור המקסימלי: <b id='bridge-pct-lbl'>" + str(bridge_pct) + "%</b></div>"
+        "<input type='range' id='bridge-pct' min='0' max='100' step='5' value='" + str(bridge_pct) + "' style='width:100%;accent-color:var(--acc)'>"
+        "<div class='btrack' style='height:8px;margin-top:10px'><div class='bfill' id='bridge-bar' style='width:" + str(bridge_pct) + "%'></div></div>"
+        "<div class='s' style='margin:10px 0 4px'>כמה לוקחים כגישור (₪)</div>"
+        "<input type='number' id='bridge-amount' value='" + str(int(bridge_amt)) + "' step='10000' min='0' max='" + str(BRIDGE_MAX_TRACK_ILS) + "' inputmode='numeric' style='" + inp + "' dir='ltr'>"
+        "<button type='button' class='savebtn' data-save='bridge'>שמור נתונים</button>"
+        "<div class='s' style='margin-top:8px'>החזר חודשי על הגישור (ריבית בלבד, 4.00%): <b id='bridge-monthly' dir='ltr'>" + fmt_ils(_bridge_pay(bridge_amt)) + "</b> /חודש</div>"
+        "<div class='s'>סה״כ החזר חודשי (משכנתא + גישור): <b id='bridge-total-monthly' dir='ltr'>" + fmt_ils(mix_pay) + "</b> /חודש</div>"
+        "<div class='s'>הגישור מקזז מהמשכנתא המשלימה. בסיס נזיל " + fmt_ils(BRIDGE_BASE_ILS) + " (כללי " + fmt_ils(BRIDGE_GENERAL_ILS) + " / מניות " + fmt_ils(BRIDGE_STOCKS_ILS) + ") · דוחות Planit 09-2026 · הנחה: ההלוואות הקיימות מוחזרות ונלקחות מחדש במקסימום.</div></div>"
         "<div class='card xcard' data-exp='mtg-detail' tabindex='0' role='button' aria-expanded='false' style='margin-bottom:12px'>"
         "<div class='t' style='display:flex;align-items:center;justify-content:space-between'><span>משכנתא משלימה — החזר חודשי כולל</span>" + chev + "</div>"
         "<div class='v' dir='ltr'><span id='mtg-monthly'>" + fmt_ils(mix_pay) + "</span> <span class='muted' style='font-size:15px'>/חודש</span></div>"
@@ -1749,56 +1898,78 @@ def page_house():
         "<div class='drow'><span class='dl'>סה״כ תשלומים (20 שנה)</span><span class='dv' dir='ltr' id='trk-total-tot'>" + fmt_ils(mix_tot) + "</span></div>"
         "<div class='pfoot'>שפיצר, בהנחה שהריבית נשארת קבועה 20 שנה. פריים (4.00%) ומשתנה (4.56%) זזים עם הריבית; קבועה (4.62%) נעולה. בפועל הבנקים מערבבים מסלולים (משתנה עד ⅔ מההלוואה).</div></div>"
     )
+    lt_html = (
+        "<div class='card' style='margin-bottom:12px'>"
+        "<div class='t'>מה נשאר אחרי רכישת הבית</div>"
+        "<div class='v' id='lt-total' dir='ltr'>" + fmt_ils(lt_total) + "</div>"
+        "<div class='stackbar'><div id='lt-bar-funds' style='width:" + str(round(lt_bar_f, 1)) + "%;background:var(--acc)'></div><div id='lt-bar-meta' style='width:" + str(round(lt_bar_m, 1)) + "%;background:var(--up)'></div><div id='lt-bar-nv' style='width:" + str(round(lt_bar_n, 1)) + "%;background:var(--vio)'></div></div>"
+        "<div class='drow'><span class='dl'><span style='display:inline-block;width:9px;height:9px;border-radius:3px;background:var(--acc);margin-inline-end:4px'></span>קרנות השתלמות וקופות גמל <span class='muted'>(אורן + ליאור · נכון ל־30/09/2026)</span></span><span class='dv' dir='ltr' id='lt-funds-val'>" + fmt_ils(lt_funds) + "</span></div>"
+        "<div class='drow'><span class='dl'><span style='display:inline-block;width:9px;height:9px;border-radius:3px;background:var(--up);margin-inline-end:4px'></span>מניות Meta שנשארו <span class='muted'>(<span id='lt-meta-shares'>" + str(int(round(rsu_shares * (100.0 - rsu_pct) / 100.0))) + "</span> מניות · נטו אחרי מס)</span></span><span class='dv' dir='ltr' id='lt-meta'>" + fmt_ils(lt_meta_ils) + "</span></div>"
+        "<div class='drow'><span class='dl'><span style='display:inline-block;width:9px;height:9px;border-radius:3px;background:var(--vio);margin-inline-end:4px'></span>מניות NVIDIA — נטו אחרי מס שולי <span class='muted'>(ברוטו <span id='lt-nvidia-gross'>" + fmt_ils(lt_nvidia) + "</span> · מס שולי " + str(int(NVIDIA_GRANT_TAX_PCT)) + "%)</span></span><span class='dv' dir='ltr' id='lt-nvidia-net'>" + fmt_ils(lt_nvidia_net) + "</span></div>"
+        "<div class='drow'><span class='dl'>גישור שנלקח <span class='muted'>(יוחזר ממכירת רמת השרון — לא מנוכה כאן)</span></span><span class='dv' dir='ltr' id='lt-bridge'>" + fmt_ils(bridge_amt) + "</span></div>"
+        "<div class='s'>הקרנות מדוחות Planit 09-2026. מענק NVIDIA — טרם התקבלו מניות; מס שולי כמו בונוס, ועל הרווחים העתידיים מהמניות — מס רווחי הון.</div></div>"
+    )
     body = (
-        "<h2 class='sec'>מבט כללי</h2>"
-        "<div class='card' style='margin-bottom:12px;padding:12px 14px'><div style='display:flex;gap:10px;justify-content:space-between;text-align:center'>"
-        "<div style='flex:1;min-width:0'><div class='s'>שווי נכסים</div><div dir='ltr' id='hdr-equity' style='font-size:17px;font-weight:800;color:var(--up)'>" + fmt_ils(total) + "</div></div>"
-        "<div style='flex:1;min-width:0'><div class='s'>עלות רכישה</div><div dir='ltr' id='hdr-cost' style='font-size:17px;font-weight:800;color:var(--warn)'>" + fmt_ils(total_cost) + "</div></div>"
-        "<div style='flex:1;min-width:0'><div class='s'>משכנתא</div><div dir='ltr' id='hdr-mtg' style='font-size:17px;font-weight:800;color:var(--down)'>" + fmt_ils(mtg) + "</div></div>"
-        "</div></div>"
-        "<div id='house-data' data-rsu-net='" + str(int(rsu_net_ils)) + "' data-pf-net='" + str(int(pf_net)) + "' data-ils-rate='" + str(ils_rate) + "' data-rsu-grants='" + json.dumps(RSU_GRANTS) + "' data-vest-grants='" + json.dumps(RSU_VEST_1511) + "' data-rsu-shares='" + str(sum(sh for _, sh, _ in RSU_GRANTS)) + "' data-meta-live='" + str(meta_live) + "' hidden></div>"
+        "<div class='housewrap'><h2 class='sec'>מבט כללי</h2>"
+        "<div class='card' style='margin-bottom:12px;padding:14px 16px'><div class='ovrow'>"
+        "<div class='ovcol'><div class='s'>שווי נכסים</div>"
+        "<div class='ovbig' dir='ltr' id='hdr-assets' style='color:var(--up)'>" + fmt_ils(total + lt_total) + "</div>"
+        "<div class='ovline'>מזומן נזיל לרכישה <b dir='ltr' id='hdr-cash-liquid'>" + fmt_ils(rsu_realized_ils + pf_net) + "</b></div>"
+        "<div class='ovline'>נדל״ן <b dir='ltr' id='hdr-cash-re'>" + fmt_ils(home_val - mortgage_val + (ramat_amt if ramat_incl else 0)) + "</b></div>"
+        "<div class='ovline'>חיסכון ארוך טווח <b dir='ltr' id='hdr-lt'>" + fmt_ils(lt_total) + "</b></div></div>"
+        "<div class='ovcol'><div class='s'>עלות רכישה</div>"
+        "<div class='ovbig' dir='ltr' id='hdr-cost' style='color:var(--warn)'>" + fmt_ils(total_cost) + "</div>"
+        "<div class='ovline'>מחיר <b dir='ltr' id='hdr-cost-price'>" + fmt_ils(buy_price) + "</b></div>"
+        "<div class='ovline'>שיפוץ <b dir='ltr' id='hdr-cost-reno'>" + fmt_ils(reno_cost if reno_incl else 0) + "</b></div></div>"
+        "<div class='ovcol'><div class='s'>כיסוי</div>"
+        "<div class='ovbig' dir='ltr' id='hdr-cov' style='color:var(--acc)'>" + str(round(total / total_cost * 100)) + "%</div>"
+        "<div class='ovline'>פער למימון <b dir='ltr' id='hdr-gap'>" + fmt_ils(max(0.0, total_cost - total)) + "</b></div>"
+        "<div class='ovline'>גישור <b dir='ltr' id='hdr-gap-bridge'>" + fmt_ils(bridge_amt) + "</b> · משכנתא <b dir='ltr' id='hdr-gap-mtg'>" + fmt_ils(mtg) + "</b></div>"
+        "<div class='ovline'>החזר חודשי <b dir='ltr' id='hdr-pay'>" + fmt_ils(mix_pay + _bridge_pay(bridge_amt)) + "</b>/חודש</div>"
+        "<div class='ovline'>גישור <b dir='ltr' id='hdr-pay-bridge'>" + fmt_ils(_bridge_pay(bridge_amt)) + "</b> · משכנתא <b dir='ltr' id='hdr-pay-mtg'>" + fmt_ils(mix_pay) + "</b>/חודש</div></div>"
+        "</div><div class='ovsum'>סיכום: מזומן <b dir='ltr' id='hdr-sum-cash'>" + fmt_ils(total) + "</b> + מימון <b dir='ltr' id='hdr-sum-fin'>" + fmt_ils(max(0.0, total_cost - total)) + "</b> = עלות <b dir='ltr' id='hdr-sum-cost'>" + fmt_ils(total_cost) + "</b> · החזר חודשי <b dir='ltr' id='hdr-sum-pay'>" + fmt_ils(mix_pay + _bridge_pay(bridge_amt)) + "</b></div></div>"
+        "<div id='house-data' data-rsu-net='" + str(int(rsu_net_ils)) + "' data-pf-net='" + str(int(pf_net)) + "' data-ils-rate='" + str(ils_rate) + "' data-rsu-grants='" + json.dumps(RSU_GRANTS) + "' data-vest-grants='" + json.dumps(RSU_VEST_1511) + "' data-rsu-shares='" + str(sum(sh for _, sh, _ in RSU_GRANTS)) + "' data-meta-live='" + str(meta_live) + "' data-meta-saved='" + (str(int(meta_saved)) if meta_saved == int(meta_saved) else str(meta_saved)) + "' data-lt-funds='" + str(int(lt_funds)) + "' data-lt-nvidia='" + str(int(lt_nvidia)) + "' data-lt-nvidia-tax='" + str(int(NVIDIA_GRANT_TAX_PCT)) + "' hidden></div>"
         "<h2 class='sec'>שווי נכסים</h2>"
+        "<div class='subtabs' data-group='assets'><button type='button' class='subtab on' data-tab='cash'>מזומן לרכישת בית</button><button type='button' class='subtab' data-tab='lt'>חיסכון ארוך טווח</button></div>"
+        "<div class='tabpane' data-group='assets' data-pane='cash'>"
         "<div class='card' style='margin-bottom:12px'>"
         "<div class='t'>סה״כ מזומן זמין</div>"
         "<div class='v' id='house-total' dir='ltr'>" + fmt_ils(total) + "</div>"
-        "<div class='s' id='total-parts'>RSU " + fmt_ils(rsu_realized_ils) + " · תיק " + fmt_ils(pf_net) + " · דירה " + fmt_ils(HOME_VALUE_ILS - MORTGAGE_ILS) + "</div>"
-        "<div class='btrack' style='height:8px;margin-top:10px'><div class='bfill up' id='fund-bar' style='width:" + str(min(100, round(total / total_cost * 100))) + "%'></div></div>"
-        "<div class='s' id='fund-lbl'>" + ("המזומן מכסה את מלוא עלות הרכישה" if total >= total_cost else "המזומן מכסה " + str(round(total / total_cost * 100)) + "% מעלות הרכישה") + "</div>"
-        "<div class='s'>התיק וה־RSU אחרי מס. נורטון (₪475,000) בנפרד.</div>"
+        "<div class='stackbar'><div id='cash-bar-rsu' style='width:" + str(round(cash_bar_r, 1)) + "%;background:var(--acc)'></div><div id='cash-bar-pf' style='width:" + str(round(cash_bar_p, 1)) + "%;background:var(--up)'></div><div id='cash-bar-re' style='width:" + str(round(cash_bar_e, 1)) + "%;background:var(--vio)'></div></div>"
+        "<div class='s' id='fund-lbl' style='margin-top:6px'>" + ("המזומן מכסה את מלוא עלות הרכישה" if total >= total_cost else "המזומן מכסה " + str(round(total / total_cost * 100)) + "% מעלות הרכישה") + "</div>"
+        "<div class='drow xcard' data-exp='rsu-cfg' tabindex='0' role='button' aria-expanded='false'><span class='dl'><span style='display:inline-block;width:9px;height:9px;border-radius:3px;background:var(--acc);margin-inline-end:4px'></span>מניות Meta (RSU) <span class='muted'>(מומש <span id='rsu-pct-lbl2'>" + str(int(rsu_pct)) + "</span>% · ברוטו <span id='rsu-gross-note' dir='ltr'>" + fmt_ils(rsu_gross_realized_ils) + "</span>)</span></span><span class='dv' dir='ltr' id='rsu-total'>" + fmt_ils(rsu_realized_ils) + "</span>" + chev + "</div>"
+        "<div class='sigpanel xpanel' id='rsu-cfg' hidden>"
+        "<div class='cfghead'><span class='s'>כמה אחוז מהמניות לממש: <b id='rsu-pct-lbl'>" + str(int(rsu_pct)) + "%</b></span></div>"
+        "<input type='range' id='rsu-pct' min='0' max='100' step='5' value='" + str(int(rsu_pct)) + "' style='width:100%;accent-color:var(--acc);margin-top:2px'>"        "<div class='pricegroup'><span class='s'>מחיר מניית Meta ($)</span><input type='number' id='meta-price' value='" + (str(int(meta_price)) if meta_price == int(meta_price) else str(meta_price)) + "' step='1' min='0' inputmode='decimal' dir='ltr'><span class='vsep'></span><label class='cfgchk' title='דרוס מחיר חי — השתמש במחיר שמור'><input type='checkbox' id='meta-override'" + (" checked" if meta_override else "") + "> דריסה</label><button type='button' id='meta-reset' class='toolbtn' title='איפוס למחיר העדכני'>⟲ איפוס</button></div>"
+        "<div class='s' style='margin-top:6px'>מחיר עדכני: <b id='meta-live-lbl' dir='ltr'>" + fmt(meta_live, 2) + "</b></div>"
+        "<button type='button' class='savebtn' data-save='rsu'>שמור נתונים</button>"
         "</div>"
-        "<div class='grid g-3'>"
-        "<div class='card'><div class='t'>מניות Meta (RSU)</div>"
-        "<div class='v' id='rsu-total' dir='ltr'>" + fmt_ils(rsu_gross_realized_ils) + "</div>"
-        "<div class='s'>(סה״כ <b id='rsu-total-ils' dir='ltr'>" + fmt_ils(rsu_total_ils) + "</b> · <b id='rsu-total-usd' dir='ltr'>" + fmt(rsu_total_usd, 0) + "</b>)</div>"
-        "<div class='s' style='margin:10px 0 4px'>מחיר מניית Meta ($)</div>"
-        "<input type='number' id='meta-price' value='" + str(RSU_PRICE_USD) + "' step='1' min='0' inputmode='decimal' style='" + inp + "' dir='ltr'>"
-        "<div style='margin-top:8px;display:flex;align-items:center;gap:8px'><button type='button' id='meta-reset' style='padding:7px 12px;border-radius:10px;border:1px solid var(--line2);background:var(--panel3);color:var(--tx);font-size:13px;font-weight:600;cursor:pointer'>⟲ איפוס למחיר העדכני</button><span class='s'>מחיר עדכני: <b id='meta-live-lbl' dir='ltr'>" + fmt(meta_live, 2) + "</b></span></div>"
-        "<div class='s' style='margin:10px 0 6px'>כמה אחוז מהמניות לממש: <b id='rsu-pct-lbl'>50%</b></div>"
-        "<input type='range' id='rsu-pct' min='0' max='100' step='5' value='50' style='width:100%;accent-color:var(--acc)'>"
-        "<div class='btrack' style='height:8px;margin-top:10px'><div class='bfill' id='rsu-bar' style='width:" + str(RSU_PCT_DEFAULT) + "%'></div></div>"
-        "<div class='s' id='rsu-bar-lbl'>מושכים " + fmt_ils(rsu_gross_realized_ils) + " (" + str(RSU_PCT_DEFAULT) + "%) · נשאר " + fmt_ils(rsu_total_ils - rsu_gross_realized_ils) + "</div>"
-        "<div class='s' style='margin-top:8px'>ברוטו למכירה: <b id='rsu-gross-ils' dir='ltr'>" + fmt_ils(rsu_gross_realized_ils) + "</b> (<b id='rsu-gross-usd' dir='ltr'>" + fmt(rsu_total_usd * RSU_PCT_DEFAULT / 100.0, 0) + "</b>)</div>"
-        "<div class='s'>נטו למכירה (אחרי מס): <b id='rsu-net-ils' dir='ltr'>" + fmt_ils(rsu_realized_ils) + "</b> (<b id='rsu-usd' dir='ltr'>" + fmt(rsu_net_usd(RSU_PRICE_USD) * RSU_PCT_DEFAULT / 100.0, 0) + "</b>)</div>"
+        "<div class='drow'><span class='dl'><span style='display:inline-block;width:9px;height:9px;border-radius:3px;background:var(--up);margin-inline-end:4px'></span>תיק השקעות <span class='muted'>(נטו אחרי הלוואות ומס)</span></span><span class='dv' dir='ltr' id='pf-net'>" + fmt_ils(pf_net) + "</span></div>"
+        "<div class='subrow s'>שווי תיק " + fmt_ils(pf_ils) + " (Flex " + dstr(daily["date"]) + ") · הלוואות " + fmt_ils(total_loans) + " · מס משוער " + (fmt_ils(tax_ils) if tax_ils is not None else "—") + " · נורטון (₪475,000) בנפרד.</div>"
+        "<div class='drow xcard' data-exp='re-cfg' tabindex='0' role='button' aria-expanded='false'><span class='dl'><span style='display:inline-block;width:9px;height:9px;border-radius:3px;background:var(--vio);margin-inline-end:4px'></span>נדל״ן <span class='muted'>(בית נוכחי נטו<span id='re-ramat-note'>" + (" + רמת השרון" if ramat_incl else "") + "</span>)</span></span><span class='dv' dir='ltr' id='realestate-total'>" + fmt_ils(home_val - mortgage_val + (ramat_amt if ramat_incl else 0)) + "</span>" + chev + "</div>"
+        "<div class='sigpanel xpanel' id='re-cfg' hidden>"
+        "<div class='s'>דירה נוכחית — תמורה נטו: <b id='home-net' dir='ltr'>" + fmt_ils(home_val - mortgage_val) + "</b></div>"
+        "<div style='display:flex;gap:10px;margin-top:10px'>"
+        "<div style='flex:1;min-width:0'><div class='s'>שווי הדירה (₪)</div><input type='number' id='home-val' value='" + str(int(home_val)) + "' step='50000' min='0' inputmode='numeric' style='" + inp + ";margin-top:4px' dir='ltr'></div>"
+        "<div style='flex:1;min-width:0'><div class='s'>יתרת משכנתא (₪)</div><input type='number' id='mortgage' value='" + str(int(mortgage_val)) + "' step='10000' min='0' inputmode='numeric' style='" + inp + ";margin-top:4px' dir='ltr'></div>"
         "</div>"
-        "<div class='card'><div class='t'>תיק השקעות</div>"
-        "<div class='v' dir='ltr'>" + fmt_ils(pf_net) + "</div>"
-        "<div class='s'>שווי תיק " + fmt_ils(pf_ils) + " (Flex " + dstr(daily["date"]) + ") · הלוואות בתיק " + fmt_ils(total_loans) + " (Planit " + fmt_ils(pf_planit_loans) + " + טסלה " + fmt_ils(TESLA_LOAN_BAL_ILS) + ")</div>"
-        "<div class='s'>מס רווחי הון משוער (25% על רווח מתחילת השנה): <b>" + (fmt_ils(tax_ils) if tax_ils is not None else "—") + "</b></div></div>"
-        "<div class='card'><div class='t'>נדל״ן</div>"
-        "<div class='v' id='realestate-total' dir='ltr'>" + fmt_ils(HOME_VALUE_ILS - MORTGAGE_ILS) + "</div>"
-        "<div class='s' style='margin:10px 0 4px'>דירה נוכחית — תמורה נטו: <b id='home-net' dir='ltr'>" + fmt_ils(HOME_VALUE_ILS - MORTGAGE_ILS) + "</b></div>"
-        "<div class='s' style='margin:10px 0 4px'>שווי הדירה (₪)</div>"
-        "<input type='number' id='home-val' value='" + str(HOME_VALUE_ILS) + "' step='50000' min='0' inputmode='numeric' style='" + inp + "' dir='ltr'>"
-        "<div class='s' style='margin:10px 0 4px'>יתרת משכנתא (₪)</div>"
-        "<input type='number' id='mortgage' value='" + str(MORTGAGE_ILS) + "' step='10000' min='0' inputmode='numeric' style='" + inp + "' dir='ltr'>"
-        "<div class='s' style='margin:12px 0 4px'>רמת השרון (ירמיהו 19) — <b id='ramat-val' dir='ltr'>" + fmt_ils(RAMAT_HASHARON_ILS) + "</b></div>"
-        "<input type='number' id='ramat-amount' value='" + str(RAMAT_HASHARON_ILS) + "' step='50000' min='0' inputmode='numeric' style='" + inp + "' dir='ltr'>"
-        "<label style='display:flex;align-items:center;gap:8px;margin-top:10px;font-size:14px;font-weight:700;cursor:pointer'><input type='checkbox' id='ramat-incl' style='width:18px;height:18px;accent-color:var(--acc)'> להכליל במזומן הזמין</label>"
-        "<div class='s'>חלקנו 1/6 (מחיר מלא ₪8M). טרם נחתם; עמלה ומס לא מנוכים.</div>"
+        "<div class='s' style='margin:12px 0 4px'>רמת השרון (ירמיהו 19) — <b id='ramat-val' dir='ltr'>" + fmt_ils(ramat_amt) + "</b></div>"
+        "<div style='display:flex;gap:12px;align-items:center'>"
+        "<input type='number' id='ramat-amount' value='" + str(int(ramat_amt)) + "' step='50000' min='0' inputmode='numeric' style='" + inp + ";flex:1;min-width:0;width:auto' dir='ltr'>"
+        "<label class='cfgchk' style='font-size:13px;white-space:nowrap'><input type='checkbox' id='ramat-incl'" + (" checked" if ramat_incl else "") + "> להכליל במזומן הזמין</label>"
         "</div>"
-        "</div>" + purch_html +
-        "<div class='s' style='margin-top:4px'>מקורות: RSU — מחשבון Meta RSU Calculator (גיליון Summary), נכון ל־" + RSU_ASOF + "; תיק — Flex יומי; שער דולר חי. תרחיש לתכנון, לא ייעוץ.</div>"
-        "<script>(function(){var d=document.getElementById('house-data');var pf=parseFloat(d.dataset.pfNet||'0'),rate=parseFloat(d.dataset.ilsRate||'0'),grants=JSON.parse(d.dataset.rsuGrants||'[]'),vgrants=JSON.parse(d.dataset.vestGrants||'[]'),rsuSh=parseFloat(d.dataset.rsuShares||'0');var brackets=[[1978745,0],[2347040,0.035],[6055070,0.05],[20183565,0.08],[null,0.10]];function fmt(v){return '₪'+Math.round(v).toLocaleString('en-US');}function fmtUsd(v){return '$'+Math.round(v).toLocaleString('en-US');}function rsuNetUsd(p){var s=0;for(var i=0;i<grants.length;i++){var g=grants[i];s+=g[1]*(0.5*Math.min(p,g[0])+g[2]*Math.max(p-g[0],0));}return s;}function vestNetUsd(p){var s=0;for(var i=0;i<vgrants.length;i++){var g=vgrants[i];s+=g[1]*(0.5*Math.min(p,g[0])+g[2]*Math.max(p-g[0],0));}return s;}function tax(p){var t=0,prev=0;for(var i=0;i<brackets.length;i++){var cap=brackets[i][0],rate=brackets[i][1];if(cap===null||p<=cap){t+=(p-prev)*rate;break;}t+=(cap-prev)*rate;prev=cap;}return t;}function ann(P,apr){var r=apr/100/12,n=240;if(r===0)return P/n;var f=Math.pow(1+r,n);return P*r*f/(f-1);}function upd(){var pct=parseFloat(document.getElementById('rsu-pct').value||'0');var hv=parseFloat(document.getElementById('home-val').value||'0');var mg=parseFloat(document.getElementById('mortgage').value||'0');var price=parseFloat(document.getElementById('meta-price').value||'0');var rsuUsd=rsuNetUsd(price);var r=rsuUsd*rate*pct/100,h=hv-mg;var ra=document.getElementById('ramat-incl').checked?(parseFloat(document.getElementById('ramat-amount').value||'0')):0;var cash=r+pf+h+ra;document.getElementById('rsu-pct-lbl').textContent=pct+'%';document.getElementById('rsu-total').textContent=fmt(price*rsuSh*rate*pct/100);document.getElementById('rsu-total-ils').textContent=fmt(price*rsuSh*rate);document.getElementById('rsu-total-usd').textContent=fmtUsd(price*rsuSh);document.getElementById('rsu-bar').style.width=pct+'%';document.getElementById('rsu-bar-lbl').textContent='מושכים '+fmt(price*rsuSh*rate*pct/100)+' ('+pct+'%) · נשאר '+fmt(price*rsuSh*rate*(100-pct)/100);document.getElementById('rsu-gross-ils').textContent=fmt(price*rsuSh*rate*pct/100);document.getElementById('rsu-gross-usd').textContent=fmtUsd(price*rsuSh*pct/100);document.getElementById('rsu-net-ils').textContent=fmt(r);document.getElementById('rsu-usd').textContent=fmtUsd(rsuUsd*pct/100);document.getElementById('home-net').textContent=fmt(h);document.getElementById('realestate-total').textContent=fmt(h+ra);document.getElementById('ramat-val').textContent=fmt(parseFloat(document.getElementById('ramat-amount').value||'0'));document.getElementById('ramat-val').style.opacity=document.getElementById('ramat-incl').checked?'1':'0.45';document.getElementById('house-total').textContent=fmt(cash);document.getElementById('total-parts').textContent='RSU '+fmt(r)+' · תיק '+fmt(pf)+' · דירה '+fmt(h)+(ra>0?' · רמה״ש '+fmt(ra):'');var bp=parseFloat(document.getElementById('buy-price').value||'0');var rn=document.getElementById('reno-incl').checked?(parseFloat(document.getElementById('reno-cost').value||'0')):0;var br=bp*0.02*1.18,lw=bp*0.005*1.18,tx=tax(bp),tc=bp+br+lw+tx+rn;var mt=Math.max(0,tc-cash);document.getElementById('cost-price').textContent=fmt(bp);document.getElementById('cost-broker').textContent=fmt(br);document.getElementById('cost-lawyer').textContent=fmt(lw);document.getElementById('cost-tax').textContent=fmt(tx);document.getElementById('cost-reno').textContent=fmt(rn);document.getElementById('cost-total').textContent=fmt(tc);document.getElementById('cost-cash').textContent=fmt(cash);document.getElementById('cost-gap').textContent=fmt(mt);document.getElementById('mtg-amount').textContent=fmt(mt);document.getElementById('mtg-amount-usd').textContent=fmtUsd(mt/rate);document.getElementById('hdr-mtg').textContent=fmt(mt);document.getElementById('hdr-equity').textContent=fmt(cash);document.getElementById('hdr-cost').textContent=fmt(tc);var covRaw=tc>0?cash/tc*100:0,cov=Math.min(100,covRaw);document.getElementById('fund-bar').style.width=cov+'%';document.getElementById('fund-lbl').textContent=covRaw>=100?'המזומן מכסה את מלוא עלות הרכישה':('המזומן מכסה '+Math.round(covRaw)+'% מעלות הרכישה');document.getElementById('mtg-note').textContent=mt===0?'אין צורך במשכנתא — נשאר עודף '+fmt(cash-tc):'סכום המשכנתא = עלות כוללת פחות המזומן הזמין · פירוט בלחיצה';var tracks=[['prime',4.00],['fixed',4.62],['var',4.56]];var mixPay=0,mixInt=0,mixTot=0;for(var i=0;i<tracks.length;i++){var sh=mt/3,pay=ann(sh,tracks[i][1]);mixPay+=pay;mixInt+=pay*240-sh;mixTot+=pay*240;document.getElementById('trk-'+tracks[i][0]+'-share').textContent=fmt(sh);document.getElementById('trk-'+tracks[i][0]+'-pay').textContent=fmt(pay);document.getElementById('trk-'+tracks[i][0]+'-int').textContent=fmt(pay*240-sh);document.getElementById('trk-'+tracks[i][0]+'-tot').textContent=fmt(pay*240);}document.getElementById('mtg-monthly').textContent=fmt(mixPay);document.getElementById('mtg-monthly-usd').textContent=fmtUsd(mixPay/rate);document.getElementById('trk-total-pay-usd').textContent=fmtUsd(mixPay/rate);document.getElementById('trk-total-pay').textContent=fmt(mixPay);document.getElementById('trk-total-int').textContent=fmt(mixInt);document.getElementById('trk-total-tot').textContent=fmt(mixTot);}['rsu-pct','home-val','mortgage','buy-price','meta-price','ramat-amount','reno-cost'].forEach(function(id){document.getElementById(id).addEventListener('input',upd);});document.getElementById('ramat-incl').addEventListener('change',upd);document.getElementById('reno-incl').addEventListener('change',upd);document.getElementById('meta-reset').addEventListener('click',function(){var live=parseFloat(d.dataset.metaLive||'0');if(!live)return;var i=document.getElementById('meta-price');i.value=live;i.dispatchEvent(new Event('input',{bubbles:true}));});upd();})();</script>"
+        "<div class='s' style='margin-top:6px'>חלקנו 1/6 (מחיר מלא ₪8M). טרם נחתם; עמלה ומס לא מנוכים.</div>"
+        "<button type='button' class='savebtn' data-save='re'>שמור נתונים</button>"
+        "</div>"
+        "</div></div>"
+        "<div class='tabpane' data-group='assets' data-pane='lt' hidden>" + lt_html + "</div>"
+        "<h2 class='sec'>עלות ומימון</h2>"
+        "<div class='subtabs' data-group='cost'><button type='button' class='subtab on' data-tab='cost'>עלות רכישה</button><button type='button' class='subtab' data-tab='fin'>מימון</button></div>"
+        "<div class='tabpane' data-group='cost' data-pane='cost'>" + cost_html + "</div>"
+        "<div class='tabpane' data-group='cost' data-pane='fin' hidden>" + fin_html + "</div>"
+        "<div class='s' style='margin-top:4px'>מקורות: RSU — מחשבון Meta RSU Calculator (גיליון Summary), נכון ל־" + RSU_ASOF + "; תיק — Flex יומי; שער דולר חי. תרחיש לתכנון, לא ייעוץ. כפתור 'שמור נתונים' בכל קטגוריה שומר את כל הערכים שלה כברירת מחדל.</div>"
+        "</div>"
+        "<script>(function(){var d=document.getElementById('house-data');var pf=parseFloat(d.dataset.pfNet||'0'),rate=parseFloat(d.dataset.ilsRate||'0'),grants=JSON.parse(d.dataset.rsuGrants||'[]'),vgrants=JSON.parse(d.dataset.vestGrants||'[]'),rsuSh=parseFloat(d.dataset.rsuShares||'0');var metaSaved=parseFloat(d.dataset.metaSaved||'0');var brackets=[[1978745,0],[2347040,0.035],[6055070,0.05],[20183565,0.08],[null,0.10]];function fmt(v){return '₪'+Math.round(v).toLocaleString('en-US');}function fmtUsd(v){return '$'+Math.round(v).toLocaleString('en-US');}function rsuNetUsd(p){var s=0;for(var i=0;i<grants.length;i++){var g=grants[i];s+=g[1]*(0.5*Math.min(p,g[0])+g[2]*Math.max(p-g[0],0));}return s;}function vestNetUsd(p){var s=0;for(var i=0;i<vgrants.length;i++){var g=vgrants[i];s+=g[1]*(0.5*Math.min(p,g[0])+g[2]*Math.max(p-g[0],0));}return s;}function tax(p){var t=0,prev=0;for(var i=0;i<brackets.length;i++){var cap=brackets[i][0],rate=brackets[i][1];if(cap===null||p<=cap){t+=(p-prev)*rate;break;}t+=(cap-prev)*rate;prev=cap;}return t;}function ann(P,apr){var r=apr/100/12,n=240;if(r===0)return P/n;var f=Math.pow(1+r,n);return P*r*f/(f-1);}function upd(){var pct=parseFloat(document.getElementById('rsu-pct').value||'0');var hv=parseFloat(document.getElementById('home-val').value||'0');var mg=parseFloat(document.getElementById('mortgage').value||'0');var price=parseFloat(document.getElementById('meta-price').value||'0');var rsuUsd=rsuNetUsd(price);var r=rsuUsd*rate*pct/100,h=hv-mg;var ra=document.getElementById('ramat-incl').checked?(parseFloat(document.getElementById('ramat-amount').value||'0')):0;var cash=r+pf+h+ra;document.getElementById('rsu-pct-lbl').textContent=pct+'%';document.getElementById('rsu-pct-lbl2').textContent=pct;document.getElementById('rsu-total').textContent=fmt(r);document.getElementById('rsu-gross-note').textContent=fmt(price*rsuSh*rate*pct/100);document.getElementById('home-net').textContent=fmt(h);document.getElementById('realestate-total').textContent=fmt(h+ra);document.getElementById('re-ramat-note').textContent=ra>0?' + רמת השרון':'';document.getElementById('ramat-val').textContent=fmt(parseFloat(document.getElementById('ramat-amount').value||'0'));document.getElementById('ramat-val').style.opacity=document.getElementById('ramat-incl').checked?'1':'0.45';document.getElementById('house-total').textContent=fmt(cash);document.getElementById('cash-bar-rsu').style.width=(cash>0?r/cash*100:0)+'%';document.getElementById('cash-bar-pf').style.width=(cash>0?pf/cash*100:0)+'%';document.getElementById('cash-bar-re').style.width=(cash>0?(h+ra)/cash*100:0)+'%';var bp=parseFloat(document.getElementById('buy-price').value||'0');var rn=document.getElementById('reno-incl').checked?(parseFloat(document.getElementById('reno-cost').value||'0')):0;var br=bp*0.02*1.18,lw=bp*0.005*1.18,tx=tax(bp),tc=bp+br+lw+tx+rn;var bg=Math.max(0,parseFloat(document.getElementById('bridge-amount').value||'0'));if(bg>812612)bg=812612;var bpct=Math.max(0,Math.min(100,Math.round(bg/812612*100)));if(document.activeElement!==document.getElementById('bridge-pct')){document.getElementById('bridge-pct').value=bpct;}document.getElementById('bridge-pct-lbl').textContent=bpct+'%';document.getElementById('bridge-bar').style.width=bpct+'%';var bgPay=bg>0?Math.max(0,Math.round((bg+475000)*0.04/12-1714)):0;var mt=Math.max(0,tc-cash-bg);document.getElementById('bridge-monthly').textContent=fmt(bgPay);document.getElementById('cost-price').textContent=fmt(bp);document.getElementById('cost-broker').textContent=fmt(br);document.getElementById('cost-lawyer').textContent=fmt(lw);document.getElementById('cost-tax').textContent=fmt(tx);document.getElementById('cost-reno').textContent=fmt(rn);document.getElementById('cost-total').textContent=fmt(tc);document.getElementById('cost-cash').textContent=fmt(cash);document.getElementById('cost-gap').textContent=fmt(mt);document.getElementById('mtg-amount').textContent=fmt(mt);document.getElementById('mtg-amount-usd').textContent=fmtUsd(mt/rate);var covRaw=tc>0?cash/tc*100:0,cov=Math.min(100,covRaw);document.getElementById('fund-lbl').textContent=covRaw>=100?'המזומן מכסה את מלוא עלות הרכישה':('המזומן מכסה '+Math.round(covRaw)+'% מעלות הרכישה');document.getElementById('mtg-note').textContent=mt===0?'אין צורך במשכנתא — נשאר עודף '+fmt(cash-tc):(bg>0?'סכום המשכנתא = עלות כוללת פחות המזומן הזמין פחות הגישור · פירוט בלחיצה':'סכום המשכנתא = עלות כוללת פחות המזומן הזמין · פירוט בלחיצה');var tracks=[['prime',4.00],['fixed',4.62],['var',4.56]];var mixPay=0,mixInt=0,mixTot=0;for(var i=0;i<tracks.length;i++){var sh=mt/3,pay=ann(sh,tracks[i][1]);mixPay+=pay;mixInt+=pay*240-sh;mixTot+=pay*240;document.getElementById('trk-'+tracks[i][0]+'-share').textContent=fmt(sh);document.getElementById('trk-'+tracks[i][0]+'-pay').textContent=fmt(pay);document.getElementById('trk-'+tracks[i][0]+'-int').textContent=fmt(pay*240-sh);document.getElementById('trk-'+tracks[i][0]+'-tot').textContent=fmt(pay*240);}document.getElementById('mtg-monthly').textContent=fmt(mixPay);document.getElementById('bridge-total-monthly').textContent=fmt(mixPay+bgPay);document.getElementById('mtg-monthly-usd').textContent=fmtUsd(mixPay/rate);document.getElementById('trk-total-pay-usd').textContent=fmtUsd(mixPay/rate);document.getElementById('trk-total-pay').textContent=fmt(mixPay);document.getElementById('trk-total-int').textContent=fmt(mixInt);document.getElementById('trk-total-tot').textContent=fmt(mixTot);var ltF=parseFloat(d.dataset.ltFunds||'0');var ltNvG=parseFloat(d.dataset.ltNvidia||'0');var ltNvT=parseFloat(d.dataset.ltNvidiaTax||'0');var ltNv=ltNvG*(1-ltNvT/100);var ltM=rsuUsd*rate*(100-pct)/100;var ltT=ltF+ltM+ltNv;document.getElementById('lt-nvidia-gross').textContent=fmt(ltNvG);document.getElementById('lt-nvidia-net').textContent=fmt(ltNv);document.getElementById('lt-meta').textContent=fmt(ltM);document.getElementById('lt-meta-shares').textContent=Math.round(rsuSh*(100-pct)/100);document.getElementById('lt-bridge').textContent=fmt(bg);document.getElementById('lt-total').textContent=fmt(ltT);document.getElementById('lt-bar-funds').style.width=(ltT>0?ltF/ltT*100:0)+'%';document.getElementById('lt-bar-meta').style.width=(ltT>0?ltM/ltT*100:0)+'%';document.getElementById('lt-bar-nv').style.width=(ltT>0?ltNv/ltT*100:0)+'%';document.getElementById('hdr-cash-liquid').textContent=fmt(r+pf);document.getElementById('hdr-cash-re').textContent=fmt(h+ra);document.getElementById('hdr-lt').textContent=fmt(ltT);document.getElementById('hdr-assets').textContent=fmt(cash+ltT);document.getElementById('hdr-cost').textContent=fmt(tc);document.getElementById('hdr-cost-price').textContent=fmt(bp);document.getElementById('hdr-cost-reno').textContent=fmt(rn);document.getElementById('hdr-cov').textContent=Math.round(covRaw)+'%';document.getElementById('hdr-gap').textContent=fmt(Math.max(0,tc-cash));document.getElementById('hdr-gap-bridge').textContent=fmt(bg);document.getElementById('hdr-gap-mtg').textContent=fmt(mt);document.getElementById('hdr-sum-cash').textContent=fmt(cash);document.getElementById('hdr-sum-fin').textContent=fmt(Math.max(0,tc-cash));document.getElementById('hdr-sum-cost').textContent=fmt(tc);document.getElementById('hdr-sum-pay').textContent=fmt(mixPay+bgPay);document.getElementById('hdr-pay').textContent=fmt(mixPay+bgPay);document.getElementById('hdr-pay-bridge').textContent=fmt(bgPay);document.getElementById('hdr-pay-mtg').textContent=fmt(mixPay);}['rsu-pct','home-val','mortgage','buy-price','meta-price','ramat-amount','reno-cost','bridge-amount'].forEach(function(id){document.getElementById(id).addEventListener('input',upd);});document.getElementById('ramat-incl').addEventListener('change',upd);document.getElementById('reno-incl').addEventListener('change',upd);document.getElementById('meta-override').addEventListener('change',function(){var cb=this;var was=cb.checked;function apply(state){var i=document.getElementById('meta-price');if(state){if(metaSaved>0)i.value=metaSaved;}else{var live=parseFloat(d.dataset.metaLive||'0');if(live>0)i.value=live;}i.dispatchEvent(new Event('input',{bubbles:true}));}apply(was);fetch('/house/defaults',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'meta_override',value:was})}).then(function(r){if(!r.ok)throw new Error('bad');}).catch(function(){cb.checked=!was;apply(!was);alert('השמירה נכשלה — רענן את הדף ונסה שוב');});});document.getElementById('bridge-pct').addEventListener('input',function(){var p=parseFloat(this.value||'0');var a=document.getElementById('bridge-amount');a.value=Math.round(p/100*812612);upd();});document.getElementById('meta-reset').addEventListener('click',function(){var live=parseFloat(d.dataset.metaLive||'0');if(!live)return;var i=document.getElementById('meta-price');i.value=live;i.dispatchEvent(new Event('input',{bubbles:true}));var cb=document.getElementById('meta-override');if(cb.checked){cb.checked=false;cb.dispatchEvent(new Event('change',{bubbles:true}));}});var saveGroups={rsu:[['rsu_pct','rsu-pct'],['meta_price','meta-price'],['meta_override','meta-override']],re:[['home_val','home-val'],['mortgage','mortgage'],['ramat_amount','ramat-amount'],['ramat_incl','ramat-incl']],cost:[['buy_price','buy-price'],['reno_cost','reno-cost'],['reno_incl','reno-incl']],bridge:[['bridge_amount','bridge-amount']]};document.querySelectorAll('.savebtn').forEach(function(b){b.addEventListener('click',function(){var vals={};saveGroups[b.dataset.save].forEach(function(p){var el=document.getElementById(p[1]);vals[p[0]]=el.type==='checkbox'?el.checked:parseFloat(el.value||'0');});var orig=b.textContent;b.disabled=true;b.textContent='שומר…';fetch('/house/defaults',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({values:vals})}).then(function(r){if(!r.ok)throw new Error('bad');return r.json();}).then(function(){if(b.dataset.save==='rsu'){metaSaved=parseFloat(document.getElementById('meta-price').value||'0');}b.textContent='✓ נשמר';setTimeout(function(){b.textContent=orig;b.disabled=false;},1500);}).catch(function(){b.textContent='שגיאה — נסה שוב';setTimeout(function(){b.textContent=orig;b.disabled=false;},2000);});});});document.querySelectorAll('.subtabs').forEach(function(bar){bar.querySelectorAll('.subtab').forEach(function(b){b.addEventListener('click',function(){bar.querySelectorAll('.subtab').forEach(function(x){x.classList.toggle('on',x===b);});var sec=bar.parentElement;sec.querySelectorAll('.tabpane').forEach(function(p){if(p.dataset.group===bar.dataset.group)p.hidden=(p.dataset.pane!==b.dataset.tab);});});});});upd();})();</script>"
     )
     return layout("רכישת בית", "/house", body, asof)
 
@@ -1865,6 +2036,10 @@ def page_positions(mode="day"):
     und_syms = sorted({o["underlying"] for o in OPTIONS})
     uq = get_quotes(und_syms)
     def qty(i):
+        # Flex daily is the source of truth (see home qty): absent = sold.
+        if daily and daily.get("positions"):
+            fp = flex_pos.get(norm(i["symbol"]))
+            return fp["qty"] if fp else 0
         fp = flex_pos.get(norm(i["symbol"]))
         return fp["qty"] if fp else i.get("shares")
     def val(i):
@@ -1886,6 +2061,7 @@ def page_positions(mode="day"):
     else: head_extra = "<th>כניסה ראשונה</th><th>עלות ממוצעת</th><th>ממומש</th><th>לא ממומש</th><th>סה״כ מאז כניסה</th>"
     rows = ""; prows = []
     for i in POS:
+        if not qty(i): continue  # sold — absent from the Flex daily file
         s = i["symbol"]; ns = norm(s); q = qs.get(s); v = val(i)
         fp = flex_pos.get(ns); fg = fifo.get(ns, {})
         base = ("<td><b>" + esc(s) + "</b></td><td data-v='" + (("%g" % qty(i)) if qty(i) else "") + "'>" + (("%g" % qty(i)) if qty(i) else "—") + "</td><td data-v='" + (str(q["price"]) if q else "") + "'>" + (fmt(q["price"]) if q else "אין נתון")
@@ -2043,7 +2219,7 @@ def page_garp(sel):
 # ---------- page 4: daily digest ----------
 DIGEST_DIR = os.path.join(BASE, "digest")
 SECTIONS = [("email", "מיילים"), ("discord", "דיסקורד"), ("whatsapp", "וואטסאפ"), ("x", "X"), ("youtube", "YouTube")]
-SRC_COLORS = {"email": "#4da3ff", "discord": "#8b9cf9", "whatsapp": "#31c573", "x": "#9aa7bd", "youtube": "#f45d5d"}
+SRC_COLORS = {"email": "#5ea0f7", "discord": "#8b9cf9", "whatsapp": "#4ade80", "x": "#9aa7bd", "youtube": "#f87171"}
 def digest_dates():
     try:
         return sorted([os.path.basename(f)[:-5] for f in glob.glob(os.path.join(DIGEST_DIR, "20??-??-??.json"))], reverse=True)
@@ -2086,7 +2262,7 @@ def page_daily(dsel):
         sec = secs.get(key) or {}
         items = sec.get("items") or []
         body += ("<div class='sechead'><span class='srcdot' style='background:%s'></span><h2>%s</h2>"
-                 "<span class='count'>%d פריטים</span></div>" % (SRC_COLORS.get(key, "#4da3ff"), label, len(items)))
+                 "<span class='count'>%d פריטים</span></div>" % (SRC_COLORS.get(key, "#5ea0f7"), label, len(items)))
         meta = []
         if sec.get("updated_at"): meta.append("עודכן " + sec["updated_at"])
         if sec.get("note"): meta.append(sec["note"])
@@ -2128,6 +2304,56 @@ class H(BaseHTTPRequestHandler):
             else: return self.send_error(404)
             b = body.encode() if isinstance(body, str) else body
             self.send_response(200); self.send_header("Content-Type", ct); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def do_POST(self):
+        u = urllib.parse.urlparse(self.path)
+        try:
+            if u.path == "/house/defaults":
+                n = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(n) if n > 0 else b""
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    return self.send_error(400, "bad json")
+                vals = payload.get("values")
+                if isinstance(vals, dict):
+                    items = list(vals.items())
+                else:
+                    items = [(payload.get("key"), payload.get("value"))]
+                cleaned = {}
+                for key, value in items:
+                    kind = HOUSE_DEFAULT_KEYS.get(key)
+                    if kind is None:
+                        return self.send_error(400, "unknown key")
+                    if kind == "bool":
+                        if not isinstance(value, bool):
+                            return self.send_error(400, "bool expected")
+                    else:
+                        try:
+                            value = float(value)
+                        except Exception:
+                            return self.send_error(400, "number expected")
+                        if value != value or value == float("inf") or value == float("-inf") or value < 0:
+                            return self.send_error(400, "bad number")
+                        if key == "rsu_pct":
+                            value = max(0.0, min(100.0, value))
+                        if key == "bridge_amount":
+                            value = max(0.0, min(float(BRIDGE_MAX_TRACK_ILS), value))
+                        value = int(value) if float(value).is_integer() else value
+                    cleaned[key] = value
+                dfl = None
+                for key, value in cleaned.items():
+                    dfl = save_house_default(key, value)
+                b = json.dumps({"ok": True, "defaults": dfl}, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+                return
+            return self.send_error(404)
         except Exception as e:
             self.send_error(500, str(e))
 
