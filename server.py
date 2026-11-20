@@ -1798,6 +1798,14 @@ def page_house():
     asof = "Flex %s · שער דולר %.3f · RSU נכון ל־%s" % (dstr(daily["date"]), ils_rate, RSU_ASOF)
     # portfolio counts AFTER capital gains tax; RSU at the default realization % (Oren, 10/11/2026)
     pf_net = net_after_tax if net_after_tax is not None else net_ils
+    # immediate cash (Oren, 20/11/2026): sell the whole portfolio after tax WITHOUT
+    # repaying any loans, plus the borrowing capacity NOT yet taken against the
+    # hishtalmut/gemel funds — 50/70 gross max (BRIDGE_MAX_TRACK_ILS is net of Norton)
+    # minus the Planit loans already borrowed against those funds.
+    pf_after_tax = (pf_ils - tax_ils) if tax_ils is not None else pf_ils
+    bridge_gross_max = BRIDGE_MAX_TRACK_ILS + NORTON_LOAN_ILS  # 1,287,612
+    bridge_unused = bridge_gross_max - PLANIT_LOANS_ILS  # 529,212
+    imm_total = pf_after_tax + bridge_unused
     dfl = load_house_defaults()  # user-saved defaults from the site (house_defaults.json)
     rsu_pct = _def_num(dfl, "rsu_pct", RSU_PCT_DEFAULT, 0.0, 100.0)
     home_val = _def_num(dfl, "home_val", HOME_VALUE_ILS)
@@ -1911,6 +1919,7 @@ def page_house():
     )
     body = (
         "<div class='housewrap'><h2 class='sec'>מבט כללי</h2>"
+        "<div class='s' style='margin:-4px 0 12px'>מזומן מיידי (ללא RSU, ללא נדל״ן): <b dir='ltr' id='hdr-imm-total'>" + fmt_ils(imm_total) + "</b> <span class='muted'>(מזה שלי: <b dir='ltr' id='hdr-imm-own'>" + fmt_ils(pf_after_tax) + "</b> · הלוואות: <b dir='ltr' id='hdr-imm-loans'>" + fmt_ils(bridge_unused) + "</b>)</span> <span class='muted'>· מכירת כל התיק אחרי מס + יתרת מסגרת הגישור (50/70) · בלי החזר הלוואות</span></div>"
         "<div class='card' style='margin-bottom:12px;padding:14px 16px'><div class='ovrow'>"
         "<div class='ovcol'><div class='s'>שווי נכסים</div>"
         "<div class='ovbig' dir='ltr' id='hdr-assets' style='color:var(--up)'>" + fmt_ils(total + lt_total) + "</div>"
