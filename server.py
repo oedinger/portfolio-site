@@ -1798,18 +1798,15 @@ def page_house():
     asof = "Flex %s · שער דולר %.3f · RSU נכון ל־%s" % (dstr(daily["date"]), ils_rate, RSU_ASOF)
     # portfolio counts AFTER capital gains tax; RSU at the default realization % (Oren, 10/11/2026)
     pf_net = net_after_tax if net_after_tax is not None else net_ils
-    # immediate cash (Oren, 20/11/2026): sell the whole portfolio and draw all
-    # remaining borrowing capacity, WITHOUT repaying anything. Split shown as a
-    # validation: own cash = portfolio after repaying its loans and tax (pf_net);
-    # loans = the loans already inside the portfolio + the unused capacity against
-    # the hishtalmut/gemel funds (50/70 gross max minus Planit loans already
-    # borrowed). Norton is excluded from both sides. Identity:
-    #   pf_net + (total_loans + bridge_unused) == pf_after_tax + bridge_unused.
-    pf_after_tax = (pf_ils - tax_ils) if tax_ils is not None else pf_ils
-    bridge_gross_max = BRIDGE_MAX_TRACK_ILS + NORTON_LOAN_ILS  # 1,287,612
-    bridge_unused = bridge_gross_max - PLANIT_LOANS_ILS  # 529,212
-    imm_own = pf_net
-    imm_loans = total_loans + bridge_unused  # 977,170
+    # immediate cash (Oren, 20/11/2026): sell the whole portfolio, repay ALL its
+    # loans + tax, then take the maximum bridge without Norton. The bridge is the
+    # site's BRIDGE_MAX_TRACK_ILS (50/70 gross max 1,287,612 minus Norton 475,000):
+    # repaying the ex-Norton Planit loans from the sale frees that capacity, so
+    # the full 812,612 is actually drawable. Do NOT add the loans already in the
+    # portfolio to the loans figure — that made it look like ~1M of bridge when
+    # the real max is ~812K.
+    imm_own = pf_net  # after repaying all portfolio loans and tax
+    imm_loans = BRIDGE_MAX_TRACK_ILS  # 812,612 — max bridge without Norton
     imm_total = imm_own + imm_loans
     dfl = load_house_defaults()  # user-saved defaults from the site (house_defaults.json)
     rsu_pct = _def_num(dfl, "rsu_pct", RSU_PCT_DEFAULT, 0.0, 100.0)
@@ -1924,7 +1921,7 @@ def page_house():
     )
     body = (
         "<div class='housewrap'><h2 class='sec'>מבט כללי</h2>"
-        "<div class='s' style='margin:-4px 0 12px'>מזומן מיידי (ללא RSU, ללא נדל״ן): <b dir='ltr' id='hdr-imm-total'>" + fmt_ils(imm_total) + "</b> <span class='muted'>(מזה שלי: <b dir='ltr' id='hdr-imm-own'>" + fmt_ils(imm_own) + "</b> · הלוואות: <b dir='ltr' id='hdr-imm-loans'>" + fmt_ils(imm_loans) + "</b>)</span> <span class='muted'>· שלי = אחרי החזר הלוואות ומס · הלוואות כולל בתיק (" + fmt_ils(total_loans) + ") + יתרת מסגרת (50/70) " + fmt_ils(bridge_unused) + " · ללא נורטון</span></div>"
+        "<div class='s' style='margin:-4px 0 12px'>מזומן מיידי (ללא RSU, ללא נדל״ן): <b dir='ltr' id='hdr-imm-total'>" + fmt_ils(imm_total) + "</b> <span class='muted'>(מזה שלי: <b dir='ltr' id='hdr-imm-own'>" + fmt_ils(imm_own) + "</b> · הלוואות: <b dir='ltr' id='hdr-imm-loans'>" + fmt_ils(imm_loans) + "</b>)</span> <span class='muted'>· שלי = אחרי החזר כל ההלוואות ומס · הלוואות = גישור מקסימלי (50/70) ללא נורטון</span></div>"
         "<div class='card' style='margin-bottom:12px;padding:14px 16px'><div class='ovrow'>"
         "<div class='ovcol'><div class='s'>שווי נכסים</div>"
         "<div class='ovbig' dir='ltr' id='hdr-assets' style='color:var(--up)'>" + fmt_ils(total + lt_total) + "</div>"
