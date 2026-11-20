@@ -1812,6 +1812,10 @@ def page_house():
     imm_own = pf_net  # after repaying all portfolio loans and tax
     imm_loans = BRIDGE_MAX_TRACK_ILS  # 812,612 — max bridge without Norton
     imm_total = imm_own + imm_loans
+    # funds borrowing capacity (Oren, 20/11/2026): taken vs left, shown in the overview
+    funds_max = BRIDGE_MAX_TRACK_ILS + NORTON_LOAN_ILS  # 1,287,612 — 50/70 gross max
+    funds_taken = PLANIT_LOANS_ILS  # 758,400 — already borrowed against the funds
+    funds_left = funds_max - funds_taken  # 529,212
     dfl = load_house_defaults()  # user-saved defaults from the site (house_defaults.json)
     rsu_pct = _def_num(dfl, "rsu_pct", RSU_PCT_DEFAULT, 0.0, 100.0)
     home_val = _def_num(dfl, "home_val", HOME_VALUE_ILS)
@@ -1939,6 +1943,8 @@ def page_house():
         "<div class='drow tot'><span class='dl'>מימון נדרש (כולל גישור)</span><span class='dv' dir='ltr'><b id='hdr-fin-pct'>" + str(100 - round(total / total_cost * 100)) + "%</b></span></div>"
         "<div class='drow sub'><span class='dl'>פער למימון</span><span class='dv' dir='ltr' id='hdr-gap'>" + fmt_ils(max(0.0, total_cost - total)) + "</span></div>"
         "<div class='drow sub'><span class='dl'>גישור · משכנתא</span><span class='dv' dir='ltr'><span id='hdr-gap-bridge'>" + fmt_ils(bridge_amt) + "</span> · <span id='hdr-gap-mtg'>" + fmt_ils(mtg) + "</span></span></div>"
+        "<div class='drow sub'><span class='dl'>נלקח מהקרנות</span><span class='dv' dir='ltr'>" + fmt_ils(funds_taken) + "</span></div>"
+        "<div class='drow sub'><span class='dl'>נשאר לקחת (מסגרת " + fmt_ils(funds_max) + ")</span><span class='dv' dir='ltr'>" + fmt_ils(funds_left) + "</span></div>"
         "<div class='drow tot'><span class='dl'>החזר חודשי (כולל גישור)</span><span class='dv' dir='ltr'><b id='hdr-pay'>" + fmt_ils(mix_pay + _bridge_pay(bridge_amt)) + "</b> <span class='muted'>/חודש</span></span></div>"
         "<div class='drow sub'><span class='dl'>גישור · משכנתא</span><span class='dv' dir='ltr'><span id='hdr-pay-bridge'>" + fmt_ils(_bridge_pay(bridge_amt)) + "</span> · <span id='hdr-pay-mtg'>" + fmt_ils(mix_pay) + "</span> <span class='muted'>/חודש</span></span></div>"
         "</div>"
