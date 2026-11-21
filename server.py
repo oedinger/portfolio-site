@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Portfolio Pi v2 — JTBD redesign (stdlib only)
-import json, os, re, time, html, glob, subprocess, threading, urllib.request, urllib.parse, xml.etree.ElementTree as ET
+import json, os, re, sys, time, html, glob, shutil, subprocess, threading, urllib.request, urllib.parse, xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -2255,7 +2255,7 @@ def page_garp(sel):
     if it.get("method") in ("garp", "garp_blocked") and fair:
         kv += "<div class='card'><div class='t'>רצועת קנייה (ראש–תחתית)</div><div class='v'>%s – %s</div></div>" % (fmt(entry), fmt(bot))
     if exitp: kv += "<div class='card'><div class='t'>מחיר יציאה</div><div class='v'>%s</div><div class='muted'>מרחק: %s</div></div>" % (fmt(exitp), dist(exitp))
-    if q and q.get("ma150"): kv += "<div class='card'><div class='t'>ממוצע נע 150 / 200</div><div class='v'>%s / %s</div><div class='muted'>מרחק: %s / %s · שיא 52ש׳ %s · שפל %s</div></div>" % (fmt(q["ma150"]), fmt(q["ma200"]), pct((p/q["ma150"]-1)*100), pct((p/q["ma200"]-1)*100), fmt(q.get("high52")), fmt(q.get("low52")))
+    if q and q.get("ma150") and q.get("ma200"): kv += "<div class='card'><div class='t'>ממוצע נע 150 / 200</div><div class='v'>%s / %s</div><div class='muted'>מרחק: %s / %s · שיא 52ש׳ %s · שפל %s</div></div>" % (fmt(q["ma150"]), fmt(q["ma200"]), pct((p/q["ma150"]-1)*100), pct((p/q["ma200"]-1)*100), fmt(q.get("high52")), fmt(q.get("low52")))
     ns = norm(sel); fg = ((fd["ytd"].get("fifo_stk") or fd["ytd"]["fifo"]).get(ns) if fd else None)
     if fg and it["kind"] == "position":
         kv += "<div class='card'><div class='t'>מאז כניסה (IB FIFO)</div><div class='v %s'>%s</div><div class='muted'>ממומש %s · לא ממומש %s · כניסה %s</div></div>" % (
@@ -2403,9 +2403,87 @@ def _run_flex_sync():
 
 FLEX_SYNC_JS = """<script>(function(){var b=document.getElementById('flex-sync-btn'),m=document.getElementById('flex-sync-msg');var started=null,n=0;function msg(t){m.textContent=t;}b.addEventListener('click',function(){b.disabled=true;msg('מסנכרן מ־Interactive Brokers… זה יכול לקחת כמה דקות');fetch('/sync-flex',{method:'POST'}).then(function(r){return r.json();}).then(function(j){started=j.started||null;if(j.status==='running'){msg('סנכרון כבר רץ — ממתין לסיום…');}poll();}).catch(function(){b.disabled=false;msg('הסנכרון נכשל — נסה שוב');});});function poll(){if(n++>160){msg('לוקח יותר מהצפוי — רענן את הדף בעוד כמה דקות');b.disabled=false;return;}setTimeout(function(){fetch('/sync-flex/status').then(function(r){return r.json();}).then(function(j){if(j.result==='running'){poll();return;}if(j.result==='ok'&&(!started||!j.last_run||j.last_run>=started)){msg('עודכן: Flex '+j.flex_date+' — מרענן…');setTimeout(function(){location.reload();},1200);return;}if(j.result==='fail'){b.disabled=false;msg('הסנכרון נכשל'+(j.error?': '+j.error:' (קוד '+j.exit_code+')')+' — נסה שוב');return;}poll();}).catch(function(){poll();});},5000);}})();</script>"""
 
+# ---------- Pi API hostname + static render (Pages) ----------
+# The public site lives on Cloudflare Pages (static snapshot). The Pi stays the
+# data source: it renders the snapshot and serves two API calls through the
+# tunnel hostname pi.oedinger.stream, proxied by the Pages _worker.js with a
+# shared secret. On the API hostname only API paths are served, and only with
+# the secret header (fail-closed when the secret file is missing).
+API_HOST = "pi.oedinger.stream"
+API_PATHS = ("/sync-flex", "/sync-flex/status", "/house/defaults")
+def _api_secret():
+    try:
+        return open(os.path.join(BASE, "api-secret"), encoding="utf-8").read().strip()
+    except Exception:
+        return ""
+def _api_allowed(handler):
+    host = (handler.headers.get("Host") or "").split(":")[0].lower()
+    if host != API_HOST:
+        return True  # main site hostname (or localhost): normal routing
+    u = urllib.parse.urlparse(handler.path)
+    if u.path == "/health":
+        return True
+    secret = _api_secret()
+    return bool(secret) and u.path in API_PATHS and handler.headers.get("X-Pi-Secret") == secret
+
+def _staticize(html):
+    """Rewrites for the static Pages build: API calls go to /api/* (the Worker
+    proxy), query-param navigation becomes static files, and the sync button no
+    longer reloads (the snapshot refreshes within ~15 min)."""
+    html = html.replace("'/house/defaults'", "'/api/house/defaults'")
+    html = html.replace("'/sync-flex/status'", "'/api/sync-flex/status'")
+    html = html.replace("'/sync-flex'", "'/api/sync-flex'")
+    html = re.sub(r"/garp\?s=([A-Za-z0-9\^\.\-]+)", r"/garp-\1.html", html)
+    html = re.sub(r"/daily\?d=(\d{4}-\d{2}-\d{2})", r"/daily-\1.html", html)
+    html = html.replace("'/positions?p=day'", "'/positions.html'")
+    html = html.replace("'/positions?p=month'", "'/positions-month.html'")
+    html = html.replace("'/positions?p=entry'", "'/positions-entry.html'")
+    html = html.replace("<form method='get' action='/garp'>", "<form onsubmit='return false'>")
+    html = html.replace("onchange='this.form.submit()'", "onchange=\"location.href='/garp-'+this.value+'.html'\"")
+    html = re.sub(r"מרענן…'\)\;setTimeout\(function\(\)\{location\.reload\(\);\},1200\);",
+                  u"יופיע באתר תוך כ־15 דקות');b.disabled=false;", html)
+    return html
+
+def render_static(outdir):
+    """Renders every page to static HTML files in outdir (run on the Pi)."""
+    outdir = os.path.abspath(outdir)
+    os.makedirs(outdir, exist_ok=True)
+    pages = {}
+    pages["index.html"] = page_home()
+    for mode, fname in (("day", "positions.html"), ("month", "positions-month.html"), ("entry", "positions-entry.html")):
+        pages[fname] = page_positions(mode)
+    pages["signals.html"] = page_signals()
+    pages["house.html"] = page_house()
+    pages["planit.html"] = page_planit()
+    pages["daily.html"] = page_daily(None)
+    for d in digest_dates()[:14]:
+        try:
+            pages["daily-%s.html" % d] = page_daily(d)
+        except Exception as e:
+            print("WARN daily %s failed: %s" % (d, e))
+    pages["garp.html"] = page_garp("META")
+    pages["garp-META.html"] = pages["garp.html"]  # /garp?s=META rewrites here
+    for sym in KNOWN_SYMS:
+        if sym != "META":
+            try:
+                pages["garp-%s.html" % sym] = page_garp(sym)
+            except Exception as e:
+                print("WARN garp %s failed: %s" % (sym, e))
+    for fname, html in pages.items():
+        with open(os.path.join(outdir, fname), "w", encoding="utf-8") as f:
+            f.write(_staticize(html))
+    charts_out = os.path.join(outdir, "charts")
+    os.makedirs(charts_out, exist_ok=True)
+    for name in os.listdir(os.path.join(BASE, "charts")):
+        src = os.path.join(BASE, "charts", name)
+        if os.path.isfile(src):
+            shutil.copyfile(src, os.path.join(charts_out, name))
+    return sorted(pages.keys())
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        if not _api_allowed(self): return self.send_error(404)
         u = urllib.parse.urlparse(self.path); qs = urllib.parse.parse_qs(u.query)
         try:
             if u.path == "/": body, ct = page_home(), "text/html; charset=utf-8"
@@ -2430,6 +2508,7 @@ class H(BaseHTTPRequestHandler):
             self.send_error(500, str(e))
 
     def do_POST(self):
+        if not _api_allowed(self): return self.send_error(404)
         u = urllib.parse.urlparse(self.path)
         try:
             if u.path == "/house/defaults":
@@ -2497,4 +2576,8 @@ class H(BaseHTTPRequestHandler):
             self.send_error(500, str(e))
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("127.0.0.1", 8080), H).serve_forever()
+    if len(sys.argv) >= 3 and sys.argv[1] == "--render-static":
+        files = render_static(sys.argv[2])
+        print("rendered %d files to %s" % (len(files), sys.argv[2]))
+    else:
+        ThreadingHTTPServer(("127.0.0.1", 8080), H).serve_forever()
