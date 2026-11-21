@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Portfolio Pi v2 — JTBD redesign (stdlib only)
-import json, os, re, time, html, glob, urllib.request, urllib.parse, xml.etree.ElementTree as ET
+import json, os, re, time, html, glob, subprocess, threading, urllib.request, urllib.parse, xml.etree.ElementTree as ET
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -19,7 +19,23 @@ STRIP_SYMS = ["^VIX", "SOXX", "^NDX", "^GSPC"]  # indices strip: only these four
 KNOWN_SYMS = [i["symbol"] for i in POS + WATCH]
 MONTHS = ["","ינו׳","פבר׳","מרץ","אפר׳","מאי","יוני","יולי","אוג׳","ספט׳","אוק׳","נוב׳","דצמ׳"]
 FLEX_DIR = os.path.expanduser("~/ibflex/reports")
-PLANIT_LOANS_ILS = 758400; PLANIT_LOANS_N = 6; PLANIT_RATE = 4.25; PLANIT_MONTHLY_ILS = 2737; PLANIT_ASOF = "31/08/2026"
+PLANIT_LOANS_ILS = 758400; PLANIT_LOANS_N = 6; PLANIT_RATE = 4.00; PLANIT_MONTHLY_ILS = 2493; PLANIT_ASOF = "30/09/2026"  # דוחות ספטמבר 2026 (הופקו 29/10/2026); ריבית והחזר עודכנו מאוגוסט (4.25%, 2,737)
+# Planit funds (דוחות ספטמבר 2026): (owner, kind, company, balance, general, stocks, loan, inactive).
+# פנסיה וביטוח מנהלים לא רלוונטיים להלוואה — מחוץ לטבלה.
+PLANIT_FUNDS = [
+    ("אורן", "השתלמות", "מיטב", 446857, 307771, 139086, 0, False),
+    ("אורן", "השתלמות", "מור", 426408, 292535, 133873, 295400, False),
+    ("אורן", "השתלמות", "מור", 363585, 363585, 0, 168700, False),
+    ("אורן", "השתלמות", "מיטב", 197818, 135979, 61839, 0, True),
+    ("אורן", "השתלמות", "מיטב", 40563, 27883, 12680, 0, True),
+    ("אורן", "השתלמות", "הראל", 13651, 0, 13651, 0, True),
+    ("אורן", "השתלמות", "מור", 9651, 0, 9651, 60600, False),
+    ("אורן", "השתלמות", "מור", 7885, 0, 7885, 0, False),
+    ("אורן", "גמל להשקעה", "מור", 93880, 44947, 48933, 0, False),
+    ("ליאור", "השתלמות", "מור", 183291, 0, 183291, 63700, False),
+    ("ליאור", "השתלמות", "מור", 165371, 113312, 52059, 111200, False),
+    ("ליאור", "גמל להשקעה", "מור", 93880, 44947, 48933, 58800, False),
+]
 # Tesla Model 3 — מימון ישיר: קרן מקורית ₪174,882; ₪10,324 קרן הוחזרה עד 17/10/2026 → יתרה ₪164,558.
 # החזר חודשי ≈₪1,657 (אחרון שנצפה 10/10/2026, עולה בהדרגה; מקור: RiseUp — "מימון ישיר מקבוצת י(י)").
 # תנאים (אורן, 8/11): הלוואה 0% צמודה למדד — והכסף שהיה אמור לקנות את הרכב במזומן הוזרם לתיק
@@ -638,6 +654,10 @@ nav.mainnav a.on{color:#fff;background:var(--panel2);box-shadow:inset 0 -2px 0 v
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(74,222,128,.5)}70%{box-shadow:0 0 0 6px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
 .asof{font-size:11px;color:var(--tx3);white-space:nowrap}
 .asofline{font-size:11.5px;color:var(--tx3);margin:0 2px 12px}
+.syncrow{display:flex;align-items:center;gap:10px;margin:0 2px 12px}
+.syncbtn{cursor:pointer;border:1px solid var(--acc);background:rgba(94,160,247,.12);color:var(--acc2);border-radius:8px;padding:6px 14px;font-size:13px;font-weight:700;font-family:inherit}
+.syncbtn:disabled{opacity:.55;cursor:default}
+.syncrow .msg{font-size:12.5px;color:var(--tx2)}
 /* ---------- layout ---------- */
 main{max-width:1200px;margin:0 auto;padding:24px 16px 56px}
 h2.sec{margin:32px 0 14px;font-size:17px;font-weight:800;display:flex;align-items:center;gap:8px}
@@ -1158,11 +1178,12 @@ def _tabicon(kind):
         "news": "<rect x='4' y='5' width='16' height='14' rx='2.5' fill='none' stroke='currentColor' stroke-width='1.8'/><path d='M7.5 9.5 H16.5 M7.5 13 H13' stroke='currentColor' stroke-width='1.8' stroke-linecap='round'/>",
         "signal": "<path d='M12 4a5.5 5.5 0 0 0-5.5 5.5v2.6L5 15.5h14l-1.5-3.4V9.5A5.5 5.5 0 0 0 12 4z' fill='none' stroke='currentColor' stroke-width='1.9' stroke-linejoin='round'/><path d='M10 18.5a2 2 0 0 0 4 0' fill='none' stroke='currentColor' stroke-width='1.9' stroke-linecap='round'/>",
         "house": "<path d='M4 11 L12 4 L20 11' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/><path d='M6.5 9.5 V20 H17.5 V9.5' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/>",
+        "bank": "<path d='M3 10 L12 4 L21 10' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/><path d='M5 10 V18 M9.5 10 V18 M14.5 10 V18 M19 10 V18' stroke='currentColor' stroke-width='2' stroke-linecap='round'/><path d='M4 20 H20' stroke='currentColor' stroke-width='2' stroke-linecap='round'/>",
     }
     return "<svg width='21' height='21' viewBox='0 0 24 24' aria-hidden='true'>" + paths[kind] + "</svg>"
 
-TABICONS = {"/": "home", "/positions": "list", "/signals": "signal", "/garp": "chart", "/daily": "news", "/house": "house"}
-NAV = [("/", "מצב התיק"), ("/positions", "פירוט פוזיציות"), ("/signals", "אותות"), ("/garp", "GARP ושיטה"), ("/daily", "סיכום יומי"), ("/house", "רכישת בית")]
+TABICONS = {"/": "home", "/positions": "list", "/signals": "signal", "/garp": "chart", "/daily": "news", "/house": "house", "/planit": "bank"}
+NAV = [("/", "מצב התיק"), ("/positions", "פירוט פוזיציות"), ("/signals", "אותות"), ("/garp", "GARP ושיטה"), ("/daily", "סיכום יומי"), ("/house", "רכישת בית"), ("/planit", "פלניט")]
 
 def layout(title, nav, body, asof=""):
     tabs = "".join("<a href='%s' class='%s'>%s<span>%s</span></a>" % (h, "on" if h == nav else "", _tabicon(TABICONS[h]), t) for h, t in NAV)
@@ -1585,9 +1606,9 @@ def page_home():
     # Norton is separate: its loans did not fund the equity portfolio, so Norton never
     # enters any total or remainder — it appears only as its own informational row (Oren, 8/11/2026).
     pf_planit_loans = PLANIT_LOANS_ILS - NORTON_LOAN_ILS        # 283,400 (יתרת Planit לאחר ניכוי Norton)
-    pf_planit_monthly = PLANIT_MONTHLY_ILS - NORTON_MONTHLY_ILS  # 1,023
+    pf_planit_monthly = PLANIT_MONTHLY_ILS - NORTON_MONTHLY_ILS  # 779 (דוחות 09/2026)
     total_loans = pf_planit_loans + TESLA_LOAN_BAL_ILS           # 447,958 — portfolio only
-    total_monthly = pf_planit_monthly + TESLA_MONTHLY_ILS        # 2,680 — portfolio only
+    total_monthly = pf_planit_monthly + TESLA_MONTHLY_ILS        # 2,436 — portfolio only
     chev = "<svg class='chev' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='M5 9 L12 16 L19 9'/></svg>"
     def ils_cell(v, color=False):
         return "<span dir='ltr' class='%s'>%s</span>" % ("neg" if color else "", fmt_ils(v))
@@ -1752,7 +1773,9 @@ def page_home():
     mini = ("<h2 class='sec'>מה יש לי בתיק?</h2><div class='tblwrap mini-tbl'><table><thead><tr><th>סימול</th><th>שם</th><th>כמות</th><th>יום</th><th>מאז כניסה</th><th>מחיר</th><th>שווי</th><th data-sort='no'>מגמה 30 יום</th><th data-sort='no'></th></tr></thead><tbody>"
             + rows + "</tbody></table></div><div class='poscards'>" + cards + "</div><p><a href='/positions'>לכל הפירוט ←</a></p>")
     asof = "מחירים: Yahoo " + time.strftime("%H:%M %d/%m") + " (מטמון 10 דק׳) · Flex: " + (daily["file"] if daily else "—")
-    return layout("מצב התיק", "/", stats_html + perf_html + alloc_html + mini + snap_html + exp_html + strip, asof)
+    sync_html = ("<div class='syncrow'><button type='button' class='syncbtn' id='flex-sync-btn'>⟳ סנכרן Flex עכשיו</button>"
+                 "<span class='msg' id='flex-sync-msg'></span></div>" + FLEX_SYNC_JS)
+    return layout("מצב התיק", "/", sync_html + stats_html + perf_html + alloc_html + mini + snap_html + exp_html + strip, asof)
 
 def purchase_tax(price):
     tax = 0.0; prev = 0
@@ -1995,6 +2018,42 @@ def page_house():
 
 
 # ---------- signals page ----------
+# ---------- page: Planit summary ----------
+def page_planit():
+    tot_bal = sum(f[3] for f in PLANIT_FUNDS)
+    tot_gen = sum(f[4] for f in PLANIT_FUNDS)
+    tot_stk = sum(f[5] for f in PLANIT_FUNDS)
+    tot_loan = sum(f[6] for f in PLANIT_FUNDS)
+    funds_max = BRIDGE_MAX_TRACK_ILS + NORTON_LOAN_ILS  # 1,287,612 — 50/70 gross max
+    remain = funds_max - tot_loan  # 529,212
+    def cell(amt, base=0):
+        if not amt: return "<span class='muted'>—</span>"
+        s = "<span dir='ltr'>%s</span>" % fmt_ils(amt)
+        if base: s += " <span class='muted'>(%.1f%%)</span>" % (100.0 * amt / base)
+        return s
+    drows = []
+    drows.append("<div class='drow'><span class='dl'>סה״כ צבירה (השתלמות + גמל להשקעה)</span><span class='dv' dir='ltr'><b>%s</b></span></div>" % fmt_ils(tot_bal))
+    drows.append("<div class='drow'><span class='dl'>מסלול כללי</span><span class='dv' dir='ltr'><b>%s</b></span></div>" % fmt_ils(tot_gen))
+    drows.append("<div class='drow'><span class='dl'>מסלול מניות</span><span class='dv' dir='ltr'><b>%s</b></span></div>" % fmt_ils(tot_stk))
+    drows.append("<div class='drow'><span class='dl'>הלוואות <span class='muted'>(%d, כולן במור, %.2f%%, %s/חודש)</span></span><span class='dv' dir='ltr'><b>%s</b></span></div>" % (PLANIT_LOANS_N, PLANIT_RATE, fmt_ils(PLANIT_MONTHLY_ILS), fmt_ils(tot_loan)))
+    drows.append("<div class='drow'><span class='dl'>נשאר לקחת <span class='muted'>(מסגרת %s)</span></span><span class='dv' dir='ltr'><b>%s</b></span></div>" % (fmt_ils(funds_max), fmt_ils(remain)))
+    rows = ""
+    for owner, kind, co, bal, gen, stk, loan, inactive in PLANIT_FUNDS:
+        kind_txt = esc(kind) + (" <span class='muted'>*</span>" if inactive else "")
+        rows += ("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+                 % (esc(owner), kind_txt, esc(co), cell(bal), cell(gen, bal), cell(stk, bal), cell(loan)))
+    rows += ("<tr><td colspan='3'><b>סה״כ</b></td><td><b>%s</b></td><td><b>%s</b></td><td><b>%s</b></td><td><b>%s</b></td></tr>"
+             % (cell(tot_bal), cell(tot_gen, tot_bal), cell(tot_stk, tot_bal), cell(tot_loan)))
+    html = "<h2 class='sec'>סיכום דוחות פלניט</h2><div class='card'>" + "".join(drows) + "</div>"
+    html += ("<h2 class='sec'>קרנות וקופות — מסלולים והלוואות</h2><div class='tblwrap'><table><thead><tr>"
+             "<th>בעלים</th><th>מוצר</th><th>גוף</th><th>צבירה</th><th>כללי</th><th>מניות</th><th>הלוואה</th>"
+             "</tr></thead><tbody>" + rows + "</tbody></table></div>")
+    html += "<div class='s'>* קרן לא פעילה — אין הפקדות שוטפות; הכסף קיים בקרן.</div>"
+    html += ("<div class='s'>פנסיה וביטוח מנהלים לא כלולים כאן (לא רלוונטי להלוואה). "
+             "סה״כ צבירה בכל הדוחות: <b dir='ltr'>₪4,978,271</b> (אורן <b dir='ltr'>₪3,652,463</b> · ליאור <b dir='ltr'>₪1,325,808</b>).</div>")
+    asof = "נכון ל־30/09/2026 · הדוחות הופקו 29/10/2026"
+    return layout("סיכום דוחות פלניט", "/planit", html, asof)
+
 def page_signals():
     qs = get_quotes([i["symbol"] for i in POS + WATCH])
     fd = flex_data()
@@ -2303,6 +2362,47 @@ def page_daily(dsel):
                 title, linkify(it.get("summary") or "", KNOWN_SYMS), meta2, (" · " + chips) if chips else "")
     return layout("סיכום יומי", "/daily", body, "סיכום מיום " + _pill_date(dsel))
 
+# ---------- Flex on-demand sync (button on /, Oren 21/11/2026) ----------
+FLEX_STATUS_FILE = os.path.expanduser("~/pi-tasks/status/ibflex.json")
+_flex_sync_lock = threading.Lock()
+_flex_sync_busy = {"busy": False}
+
+def _flex_status():
+    st = {}
+    try:
+        with open(FLEX_STATUS_FILE, encoding="utf-8") as f: st = json.load(f)
+    except Exception: pass
+    fd = None
+    try: fd = flex_data()
+    except Exception: pass
+    daily = fd.get("daily") if fd else None
+    err = None
+    try:
+        p = os.path.expanduser("~/ibflex/fetch.log")
+        with open(p, "rb") as f:
+            f.seek(max(0, os.path.getsize(p) - 4096))
+            tail = f.read().decode("utf-8", "replace")
+        for line in reversed(tail.splitlines()):
+            if line.startswith("ERROR:"):
+                err = line[7:].strip()[:140]
+                break
+    except Exception:
+        pass
+    return {"result": st.get("result", "idle"), "started": st.get("started"),
+            "last_run": st.get("last_run"), "exit_code": st.get("exit_code"),
+            "error": err,
+            "flex_date": dstr(daily["date"]) if daily and daily.get("date") else "—",
+            "flex_file": daily.get("file") if daily else None}
+
+def _run_flex_sync():
+    try:
+        subprocess.run(["/home/oedinger/pi-tasks/rerun.sh", "ibflex"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    finally:
+        _flex_sync_busy["busy"] = False
+
+FLEX_SYNC_JS = """<script>(function(){var b=document.getElementById('flex-sync-btn'),m=document.getElementById('flex-sync-msg');var started=null,n=0;function msg(t){m.textContent=t;}b.addEventListener('click',function(){b.disabled=true;msg('מסנכרן מ־Interactive Brokers… זה יכול לקחת כמה דקות');fetch('/sync-flex',{method:'POST'}).then(function(r){return r.json();}).then(function(j){started=j.started||null;if(j.status==='running'){msg('סנכרון כבר רץ — ממתין לסיום…');}poll();}).catch(function(){b.disabled=false;msg('הסנכרון נכשל — נסה שוב');});});function poll(){if(n++>160){msg('לוקח יותר מהצפוי — רענן את הדף בעוד כמה דקות');b.disabled=false;return;}setTimeout(function(){fetch('/sync-flex/status').then(function(r){return r.json();}).then(function(j){if(j.result==='running'){poll();return;}if(j.result==='ok'&&(!started||!j.last_run||j.last_run>=started)){msg('עודכן: Flex '+j.flex_date+' — מרענן…');setTimeout(function(){location.reload();},1200);return;}if(j.result==='fail'){b.disabled=false;msg('הסנכרון נכשל'+(j.error?': '+j.error:' (קוד '+j.exit_code+')')+' — נסה שוב');return;}poll();}).catch(function(){poll();});},5000);}})();</script>"""
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
@@ -2314,12 +2414,14 @@ class H(BaseHTTPRequestHandler):
             elif u.path == "/garp": body, ct = page_garp((qs.get("s") or ["META"])[0]), "text/html; charset=utf-8"
             elif u.path == "/house": body, ct = page_house(), "text/html; charset=utf-8"
             elif u.path == "/daily": body, ct = page_daily((qs.get("d") or [None])[0]), "text/html; charset=utf-8"
+            elif u.path == "/planit": body, ct = page_planit(), "text/html; charset=utf-8"
             elif u.path.startswith("/charts/"):
                 name = os.path.basename(u.path)
                 fp = os.path.join(BASE, "charts", name)
                 if not os.path.isfile(fp): return self.send_error(404)
                 data = open(fp, "rb").read()
                 self.send_response(200); self.send_header("Content-Type", "image/png"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
+            elif u.path == "/sync-flex/status": body, ct = json.dumps(_flex_status(), ensure_ascii=False), "application/json; charset=utf-8"
             elif u.path == "/health": body, ct = "ok", "text/plain"
             else: return self.send_error(404)
             b = body.encode() if isinstance(body, str) else body
@@ -2367,6 +2469,23 @@ class H(BaseHTTPRequestHandler):
                 for key, value in cleaned.items():
                     dfl = save_house_default(key, value)
                 b = json.dumps({"ok": True, "defaults": dfl}, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+                return
+            if u.path == "/sync-flex":
+                with _flex_sync_lock:
+                    st = _flex_status()
+                    if _flex_sync_busy["busy"] or st.get("result") == "running":
+                        payload = {"status": "running", "started": st.get("started")}
+                    else:
+                        _flex_sync_busy["busy"] = True
+                        started = datetime.now().astimezone().isoformat()
+                        threading.Thread(target=_run_flex_sync, daemon=True).start()
+                        payload = {"status": "started", "started": started}
+                b = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(b)))
