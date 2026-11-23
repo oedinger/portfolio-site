@@ -36,3 +36,7 @@ the Raspberry Pi, behind Cloudflare Access).
 Copy the snapshot to `~/portfolio-pi/` on the Pi and restart the server
 process (`python3 server.py`, no systemd — see AGENTS.md for the restart
 procedure). Data source: IB Flex pulls twice daily (23:15 + 08:00 IST).
+
+## Workflow (Pi)
+
+All GitHub work for this repo runs from the Pi: edit in ~/github/portfolio-site, commit and push with git over SSH (pi-backup key). Pushes from the Pi need no Muse approval card.
