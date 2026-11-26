@@ -1187,11 +1187,13 @@ NAV = [("/", "מצב התיק"), ("/positions", "פירוט פוזיציות"), 
 
 def layout(title, nav, body, asof=""):
     tabs = "".join("<a href='%s' class='%s'>%s<span>%s</span></a>" % (h, "on" if h == nav else "", _tabicon(TABICONS[h]), t) for h, t in NAV)
+    tabs += "<a href='https://sites.oedinger.stream'>%s<span>כל האתרים</span></a>" % _tabicon("home")
     return ("<!doctype html><html lang='he' dir='rtl'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'><meta name='theme-color' content='#23232e'>"
             "<meta name='color-scheme' content='dark'><title>" + esc(title) + " · תיק ההשקעות</title>" + CSS + "</head><body>"
             "<header><div class='hwrap'><span class='brand'>" + LOGO_SVG + "תיק ההשקעות</span><nav class='mainnav'>"
             + "".join("<a href='%s' class='%s'>%s</a>" % (h, "on" if h == nav else "", t) for h, t in NAV)
+            + "<a href='https://sites.oedinger.stream'>⌂ כל האתרים</a>"
             + "</nav><span class='hside'><span class='mkt' id='mkt'><span class='dot'></span>בורסת ארה״ב</span>"
             "<span class='clock' id='clock'>--:--:--</span></span></div>"
             + "</header><main>"
